@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Praktis Brochure Linker</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Python PDF linker</p>
+          <h1>Praktis Brochure Linker</h1>
+        </div>
+        <span id="healthPill" class="pill">Checking backend</span>
+      </header>
+
+      <form id="processForm" class="layout">
+        <section class="panel input-panel">
+          <h2>Brochure</h2>
+          <p class="muted">Upload a PDF with readable text SKUs. Image-only SKU artwork is skipped.</p>
+
+          <label class="dropzone" for="pdfInput">
+            <span class="file-icon">PDF</span>
+            <span>
+              <strong id="pdfLabel">Choose brochure PDF</strong>
+              <small>Required</small>
+            </span>
+            <input id="pdfInput" name="pdf" type="file" accept="application/pdf,.pdf" required>
+          </label>
+
+          <label class="file-line" for="mappingInput">
+            <span>
+              <strong>SKU mapping</strong>
+              <small id="mappingLabel">Optional CSV or JSON with sku,url,title.</small>
+            </span>
+            <input id="mappingInput" name="mapping" type="file" accept=".csv,.json,application/json,text/csv">
+          </label>
+
+          <div class="settings">
+            <label class="toggle">
+              <input name="liveLookup" type="checkbox">
+              <span>
+                <strong>Try exact live lookup</strong>
+                <small>Checks Praktis result pages and product pages when access is allowed.</small>
+              </span>
+            </label>
+
+            <label class="toggle">
+              <input name="fallbackSearch" type="checkbox" checked>
+              <span>
+                <strong>Use Praktis search fallback</strong>
+                <small>Creates links like https://praktis.bg/catalogsearch/result?q=SKU.</small>
+              </span>
+            </label>
+
+            <label class="toggle">
+              <input name="debugBoxes" type="checkbox">
+              <span>
+                <strong>Draw debug boxes</strong>
+                <small>Useful when checking link area placement on a new brochure.</small>
+              </span>
+            </label>
+
+            <label class="toggle">
+              <input name="comparePrices" type="checkbox">
+              <span>
+                <strong>Compare brochure and website price</strong>
+                <small>Requires exact product pages from mapping or live lookup; search-result links are skipped.</small>
+              </span>
+            </label>
+
+            <div class="numbers">
+              <label>
+                <span>Min digits</span>
+                <input name="minDigits" type="number" min="5" max="12" value="5">
+              </label>
+              <label>
+                <span>Max digits</span>
+                <input name="maxDigits" type="number" min="5" max="12" value="12">
+              </label>
+              <label>
+                <span>Padding</span>
+                <input name="boxPadding" type="number" min="0" max="16" value="0">
+              </label>
+            </div>
+          </div>
+
+          <button id="processButton" class="primary" type="submit">Process PDF</button>
+        </section>
+
+        <section class="panel output-panel">
+          <div class="output-head">
+            <div>
+              <h2>Output</h2>
+              <p id="resultHint" class="muted">Results will appear after processing.</p>
+            </div>
+          </div>
+
+          <div id="progress" class="progress" hidden>
+            <span></span>
+            <p>Processing PDF...</p>
+          </div>
+
+          <div id="summaryGrid" class="summary">
+            <div><strong>0</strong><span>SKUs</span></div>
+            <div><strong>0</strong><span>Links</span></div>
+            <div><strong>0</strong><span>Unresolved</span></div>
+            <div><strong>0</strong><span>Price diffs</span></div>
+            <div><strong>0</strong><span>Pages</span></div>
+          </div>
+
+          <div id="downloads" class="downloads" hidden>
+            <button id="downloadPdf" type="button">Download PDF</button>
+            <button id="downloadCsv" type="button">Download CSV</button>
+            <button id="downloadJson" type="button">Download JSON</button>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Page</th>
+                  <th>SKU</th>
+                  <th>Status</th>
+                  <th>Box</th>
+                  <th>Brochure price</th>
+                  <th>Website price</th>
+                  <th>Price check</th>
+                  <th>URL</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody">
+                <tr class="empty"><td colspan="5">No file processed yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </form>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

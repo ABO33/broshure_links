@@ -1,0 +1,413 @@
+:root {
+  --bg: #eef2f5;
+  --surface: #ffffff;
+  --surface-soft: #f7f9fb;
+  --ink: #18232b;
+  --muted: #64727d;
+  --line: #d8e1e7;
+  --accent: #ef8b18;
+  --accent-dark: #b96207;
+  --ok: #177a55;
+  --warn: #995e00;
+  --bad: #a73333;
+  --blue: #245fe0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.shell {
+  width: min(1220px, calc(100% - 36px));
+  margin: 0 auto;
+  padding: 28px 0;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 5px;
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 34px;
+  line-height: 1.08;
+}
+
+h2 {
+  font-size: 18px;
+  margin-bottom: 6px;
+}
+
+.muted,
+small {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.pill {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.pill.ok {
+  color: var(--ok);
+  border-color: rgba(23, 122, 85, 0.25);
+}
+
+.pill.bad {
+  color: var(--bad);
+  border-color: rgba(167, 51, 51, 0.25);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 380px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(24, 35, 43, 0.1);
+}
+
+.input-panel,
+.output-panel {
+  padding: 20px;
+}
+
+.input-panel {
+  position: sticky;
+  top: 18px;
+}
+
+.dropzone {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 14px;
+  align-items: center;
+  min-height: 108px;
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px dashed #aeb9c2;
+  border-radius: 8px;
+  background: var(--surface-soft);
+  cursor: pointer;
+}
+
+.dropzone:hover,
+.file-line:hover {
+  border-color: var(--accent);
+}
+
+.file-icon {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 70px;
+  border: 1px solid var(--line);
+  border-top: 8px solid var(--accent);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--accent-dark);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.dropzone input,
+.file-line input {
+  display: none;
+}
+
+.dropzone strong,
+.file-line strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.file-line {
+  display: block;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.settings {
+  display: grid;
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.toggle {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.toggle input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+
+.toggle strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 14px;
+}
+
+.numbers {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.numbers label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.numbers input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.primary,
+.downloads button {
+  min-height: 42px;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.primary {
+  width: 100%;
+  min-height: 48px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.primary:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.output-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.progress {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.progress span {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: linear-gradient(90deg, var(--accent), #ffbd6b);
+  animation: pulse 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.summary div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  padding: 12px;
+}
+
+.summary strong {
+  display: block;
+  font-size: 24px;
+}
+
+.summary span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.downloads button {
+  padding: 0 14px;
+  background: #17232c;
+  color: #fff;
+}
+
+.downloads button:nth-child(n+2) {
+  background: #e8eef2;
+  color: var(--ink);
+}
+
+.table-wrap {
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  min-width: 1080px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: #f3f6f8;
+  color: #44525d;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.empty td {
+  padding: 34px 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-weight: 800;
+  font-size: 12px;
+}
+
+.badge.mapped,
+.badge.linked,
+.badge.match,
+.badge.website_price_found {
+  color: var(--ok);
+  background: rgba(23, 122, 85, 0.1);
+}
+
+.badge.search,
+.badge.blocked,
+.badge.search_only,
+.badge.no_url,
+.badge.no_brochure_price,
+.badge.no_website_price,
+.badge.not_found {
+  color: var(--warn);
+  background: rgba(153, 94, 0, 0.1);
+}
+
+.badge.error,
+.badge.unresolved,
+.badge.different {
+  color: var(--bad);
+  background: rgba(167, 51, 51, 0.1);
+}
+
+.muted-cell {
+  color: var(--muted);
+}
+
+.url-cell a {
+  color: var(--blue);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  .topbar,
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .input-panel {
+    position: static;
+  }
+
+  .summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

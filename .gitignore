@@ -1,0 +1,9 @@
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+data/link-cache.json
+output/
+tmp/
+*.log
+.DS_Store
