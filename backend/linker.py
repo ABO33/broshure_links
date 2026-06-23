@@ -52,6 +52,9 @@ class PageText:
 
 SKU_RE = re.compile(r"\d{5,12}")
 HEADER_SKU_TEXT_INSET = 4.0
+HEADER_PRICE_BOX_PADDING = 6.5
+HEADER_PAGE_EDGE_TOLERANCE = 18.0
+HEADER_EDGE_TOUCH_TOLERANCE = 6.0
 
 
 def process_brochure(
@@ -152,6 +155,7 @@ def extract_text_pages(pdf_bytes: bytes, min_digits: int = 5, max_digits: int = 
 def expand_sku_fragments(word: Word, min_digits: int, max_digits: int) -> list[Word]:
     if "," in word.text:
         first = word.text.split(",", 1)[0].strip()
+        first = first.split("-", 1)[0].strip()
         if first.isdigit() and min_digits <= len(first) <= max_digits:
             ratio = len(first) / max(1, len(word.text))
             return [
@@ -166,6 +170,22 @@ def expand_sku_fragments(word: Word, min_digits: int, max_digits: int) -> list[W
                 )
             ]
         return [word]
+
+    if "-" in word.text:
+        first = word.text.split("-", 1)[0].strip()
+        if first.isdigit() and min_digits <= len(first) <= max_digits:
+            ratio = len(first) / max(1, len(word.text))
+            return [
+                Word(
+                    text=first,
+                    x0=word.x0,
+                    x1=word.x0 + word.width * ratio,
+                    top=word.top,
+                    bottom=word.bottom,
+                    comma_primary=True,
+                    original_text=word.text,
+                )
+            ]
 
     matches = [match for match in SKU_RE.finditer(word.text) if min_digits <= len(match.group(0)) <= max_digits]
     if not matches or (len(matches) == 1 and word.text == matches[0].group(0)):
@@ -289,6 +309,7 @@ def detect_header_driven_boxes(
             if not price_word:
                 continue
             left_edge = clamp(word.x0 - HEADER_SKU_TEXT_INSET, 0, page.width)
+            right_edge = find_header_price_box_right(page, word, price_word, right_edge)
             top = clamp(min(word.top - 3, price_word.top - 13), 0, page.height)
             row_headers.append(
                 {
@@ -301,7 +322,8 @@ def detect_header_driven_boxes(
             )
         headers.extend(row_headers)
 
-    if len(headers) < 3:
+    primary_candidates = [word for word in candidates if not word.fragment]
+    if len(headers) < 3 and not (len(headers) == 1 and len(primary_candidates) == 1):
         return []
 
     headers.sort(key=lambda item: (item["top"], item["left"]))
@@ -345,21 +367,92 @@ def cluster_words_by_top(words: list[Word], tolerance: float) -> list[list[Word]
 def find_header_price_word(page: PageText, sku_word: Word, right_edge: float) -> Word | None:
     prices = []
     for word in page.words:
-        if not word.text.isdigit():
-            continue
-        if not 3 <= len(word.text) <= 6:
-            continue
-        if word.height < 13:
-            continue
-        if word.x0 < sku_word.x0 + 8 or word.x0 >= right_edge - 1:
-            continue
-        delta_top = word.top - sku_word.top
-        if not 4 <= delta_top <= 18:
+        if not is_header_price_word(word, sku_word, right_edge):
             continue
         prices.append(word)
+    prices.extend(find_split_header_price_words(page, sku_word, right_edge))
     if not prices:
         return None
     return sorted(prices, key=lambda item: (item.x0, item.top))[0]
+
+
+def is_header_price_word(word: Word, sku_word: Word, right_edge: float) -> bool:
+    if not word.text.isdigit():
+        return False
+    if not 3 <= len(word.text) <= 6:
+        return False
+    if word.height < 13:
+        return False
+    if word.x0 < sku_word.x0 + 8 or word.x0 >= right_edge - 1:
+        return False
+    delta_top = word.top - sku_word.top
+    return 4 <= delta_top <= 18
+
+
+def find_split_header_price_words(page: PageText, sku_word: Word, right_edge: float) -> list[Word]:
+    split_prices: list[Word] = []
+    digits = [word for word in page.words if word.text.isdigit()]
+    for whole in digits:
+        if not 1 <= len(whole.text) <= 4:
+            continue
+        if whole.text.startswith("0"):
+            continue
+        if whole.height < 18:
+            continue
+        if whole.x0 < sku_word.x0 + 8 or whole.x0 >= right_edge - 1:
+            continue
+        delta_top = whole.top - sku_word.top
+        if not 4 <= delta_top <= 44:
+            continue
+
+        cents_candidates = [
+            cents
+            for cents in digits
+            if cents is not whole
+            and len(cents.text) == 2
+            and -2 <= cents.x0 - whole.x1 <= 60
+            and abs(cents.mid_y - whole.mid_y) <= 18
+            and cents.x0 < right_edge - 1
+        ]
+        if not cents_candidates:
+            continue
+        cents = sorted(cents_candidates, key=lambda item: (item.x0, abs(item.mid_y - whole.mid_y)))[0]
+        split_prices.append(
+            Word(
+                text=f"{whole.text}{cents.text}",
+                x0=whole.x0,
+                x1=cents.x1,
+                top=min(whole.top, cents.top),
+                bottom=max(whole.bottom, cents.bottom),
+                original_text=f"{whole.text}{cents.text}",
+            )
+        )
+    return split_prices
+
+
+def find_header_price_box_right(
+    page: PageText,
+    sku_word: Word,
+    price_word: Word,
+    default_right_edge: float,
+) -> float:
+    price_words = [
+        word
+        for word in page.words
+        if word.text.isdigit()
+        and word.height >= 13
+        and word.x0 >= sku_word.x0 + 8
+        and word.x0 < default_right_edge - 1
+        and 4 <= word.top - sku_word.top <= 44
+        and abs(word.mid_y - price_word.mid_y) <= 26
+    ]
+    if not price_words:
+        return default_right_edge
+
+    right = max(word.x1 for word in price_words) + HEADER_PRICE_BOX_PADDING
+    if default_right_edge - right <= HEADER_PAGE_EDGE_TOLERANCE:
+        return default_right_edge
+    return clamp(right, sku_word.x0 + 16, default_right_edge)
 
 
 def find_next_header_top(current: dict, headers: list[dict], footer_top: float) -> float:
@@ -370,7 +463,7 @@ def find_next_header_top(current: dict, headers: list[dict], footer_top: float) 
         if other is current or other["top"] <= current["top"] + 18:
             continue
         overlap = min(right, other["right"]) - max(left, other["left"])
-        if overlap <= 1:
+        if overlap <= HEADER_EDGE_TOUCH_TOLERANCE:
             continue
         bottom = min(bottom, other["top"])
     return bottom
