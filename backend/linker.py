@@ -5,6 +5,7 @@ from io import BytesIO
 import math
 import re
 from typing import Iterable
+from urllib.parse import urlparse
 
 import pdfplumber
 from pypdf import PdfReader, PdfWriter
@@ -12,7 +13,8 @@ from pypdf.annotations import Link
 from reportlab.pdfgen import canvas
 
 from .mapping import parse_mapping
-from .resolver import compare_website_price, resolve_skus
+from .praktis_playwright import compare_prices_with_playwright
+from .resolver import compare_website_price, resolve_skus, search_url_for_sku
 
 
 @dataclass
@@ -45,9 +47,11 @@ class PageText:
     width: float
     height: float
     words: list[Word]
+    footer_top: float | None = None
 
 
 SKU_RE = re.compile(r"\d{5,12}")
+HEADER_SKU_TEXT_INSET = 4.0
 
 
 def process_brochure(
@@ -72,6 +76,7 @@ def process_brochure(
     resolved = resolve_skus(skus, mapping, live_lookup, fallback_search)
     if compare_prices:
         attach_price_comparisons(detections, resolved)
+    sanitize_resolved_links(resolved, skus)
     linked_pdf, linked_count = write_links(pdf_bytes, pages, detections, resolved, debug_boxes)
 
     rows = []
@@ -140,7 +145,7 @@ def extract_text_pages(pdf_bytes: bytes, min_digits: int = 5, max_digits: int = 
                     original_text=text,
                 )
                 words.extend(expand_sku_fragments(base, min_digits, max_digits))
-            pages.append(PageText(index, float(page.width), float(page.height), words))
+            pages.append(PageText(index, float(page.width), float(page.height), words, find_footer_top(page)))
     return pages
 
 
@@ -206,6 +211,10 @@ def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padd
     if not candidates:
         return []
 
+    header_detections = detect_header_driven_boxes(page, candidates, min_digits, max_digits, box_padding)
+    if header_detections:
+        return header_detections
+
     row_step = estimate_row_step([word.top for word in candidates])
     sku_inset = estimate_sku_inset(candidates)
 
@@ -250,6 +259,132 @@ def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padd
         seen.add(key)
         clean.append(item)
 
+    return clean
+
+
+def detect_header_driven_boxes(
+    page: PageText,
+    candidates: list[Word],
+    min_digits: int,
+    max_digits: int,
+    box_padding: float,
+) -> list[dict]:
+    footer_top = page.footer_top or page.height - 35
+    candidate_rows = cluster_words_by_top(
+        [word for word in candidates if not word.fragment and word.top < footer_top - 8],
+        tolerance=8,
+    )
+    headers: list[dict] = []
+
+    for row in candidate_rows:
+        row_words = sorted(row, key=lambda item: item.x0)
+        row_headers = []
+        for index, word in enumerate(row_words):
+            right_edge = (
+                row_words[index + 1].x0 - HEADER_SKU_TEXT_INSET
+                if index + 1 < len(row_words)
+                else page.width
+            )
+            price_word = find_header_price_word(page, word, right_edge)
+            if not price_word:
+                continue
+            left_edge = clamp(word.x0 - HEADER_SKU_TEXT_INSET, 0, page.width)
+            top = clamp(min(word.top - 3, price_word.top - 13), 0, page.height)
+            row_headers.append(
+                {
+                    "word": word,
+                    "price_word": price_word,
+                    "left": left_edge,
+                    "right": clamp(right_edge, left_edge + 8, page.width),
+                    "top": top,
+                }
+            )
+        headers.extend(row_headers)
+
+    if len(headers) < 3:
+        return []
+
+    headers.sort(key=lambda item: (item["top"], item["left"]))
+    detections: list[dict] = []
+    for header in headers:
+        bottom = find_next_header_top(header, headers, footer_top)
+        if bottom <= header["top"] + 18:
+            continue
+        box = {
+            "x": clamp(header["left"] - box_padding, 0, page.width),
+            "y": clamp(header["top"] - box_padding, 0, page.height),
+            "width": clamp(header["right"] - header["left"] + box_padding * 2, 8, page.width - header["left"]),
+            "height": clamp(bottom - header["top"] + box_padding * 2, 8, page.height - header["top"]),
+        }
+        price_text = header["price_word"].text
+        detections.append(
+            _detection(
+                page,
+                header["word"].text,
+                "item",
+                box,
+                0.94,
+                price_text,
+                brochure_price_to_decimal(price_text),
+            )
+        )
+
+    return dedupe_detections(detections)
+
+
+def cluster_words_by_top(words: list[Word], tolerance: float) -> list[list[Word]]:
+    rows: list[list[Word]] = []
+    for word in sorted(words, key=lambda item: item.top):
+        if not rows or abs(median([item.top for item in rows[-1]]) - word.top) > tolerance:
+            rows.append([word])
+        else:
+            rows[-1].append(word)
+    return rows
+
+
+def find_header_price_word(page: PageText, sku_word: Word, right_edge: float) -> Word | None:
+    prices = []
+    for word in page.words:
+        if not word.text.isdigit():
+            continue
+        if not 3 <= len(word.text) <= 6:
+            continue
+        if word.height < 13:
+            continue
+        if word.x0 < sku_word.x0 + 8 or word.x0 >= right_edge - 1:
+            continue
+        delta_top = word.top - sku_word.top
+        if not 4 <= delta_top <= 18:
+            continue
+        prices.append(word)
+    if not prices:
+        return None
+    return sorted(prices, key=lambda item: (item.x0, item.top))[0]
+
+
+def find_next_header_top(current: dict, headers: list[dict], footer_top: float) -> float:
+    bottom = footer_top
+    left = current["left"]
+    right = current["right"]
+    for other in headers:
+        if other is current or other["top"] <= current["top"] + 18:
+            continue
+        overlap = min(right, other["right"]) - max(left, other["left"])
+        if overlap <= 1:
+            continue
+        bottom = min(bottom, other["top"])
+    return bottom
+
+
+def dedupe_detections(detections: list[dict]) -> list[dict]:
+    seen: set[tuple] = set()
+    clean: list[dict] = []
+    for item in sorted(detections, key=lambda d: (d["page"], d["box"]["y"], d["box"]["x"], d["sku"])):
+        key = (item["page"], item["sku"], round(item["box"]["x"]), round(item["box"]["y"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(item)
     return clean
 
 
@@ -323,6 +458,25 @@ def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str,
     return raw, brochure_price_to_decimal(raw)
 
 
+def find_footer_top(page) -> float | None:
+    footer_candidates = []
+    for rect in getattr(page, "rects", []):
+        color = rect.get("non_stroking_color")
+        if not color or len(color) < 3:
+            continue
+        is_dark = color[0] < 0.35 and color[1] < 0.35 and color[2] < 0.35
+        if not is_dark:
+            continue
+        if rect.get("top", 0) < float(page.height) * 0.72:
+            continue
+        if rect.get("width", 0) < float(page.width) * 0.45:
+            continue
+        footer_candidates.append(float(rect["top"]))
+    if footer_candidates:
+        return min(footer_candidates)
+    return float(page.height) - 35
+
+
 def brochure_price_to_decimal(raw: str) -> float | None:
     if not raw.isdigit():
         return None
@@ -331,11 +485,23 @@ def brochure_price_to_decimal(raw: str) -> float | None:
 
 def attach_price_comparisons(detections: list[dict], resolved: dict[str, dict]) -> None:
     checked: dict[str, dict] = {}
+    unique_skus = sorted({item["sku"] for item in detections})
+    browser_results = compare_prices_with_playwright(unique_skus)
+    search_fallback_blocked: dict | None = None
     for item in detections:
         sku = item["sku"]
         if sku not in checked:
-            checked[sku] = compare_website_price(resolved.get(sku, {}))
-            resolved.setdefault(sku, {}).update(checked[sku])
+            link = resolved.get(sku, {})
+            browser_result = browser_results.get(sku, {})
+            if browser_result and browser_result.get("price_status") != "playwright_unavailable":
+                checked[sku] = browser_result
+            elif link.get("source") == "search-fallback" and search_fallback_blocked:
+                checked[sku] = dict(search_fallback_blocked)
+            else:
+                checked[sku] = compare_website_price(link)
+                if link.get("source") == "search-fallback" and checked[sku].get("price_status") == "blocked":
+                    search_fallback_blocked = checked[sku]
+            apply_price_check_result(resolved.setdefault(sku, {}), checked[sku])
 
         brochure_price = item.get("brochure_price")
         website_price = resolved.get(sku, {}).get("website_price")
@@ -351,6 +517,59 @@ def attach_price_comparisons(detections: list[dict], resolved: dict[str, dict]) 
         else:
             item["price_status"] = "different"
             item["price_message"] = "Brochure and website prices are different."
+
+
+def apply_price_check_result(link: dict, result: dict) -> None:
+    for key in ("website_price", "price_status", "price_message"):
+        if key in result:
+            link[key] = result[key]
+
+    if result.get("source") == "playwright" and result.get("url") and should_replace_link(link, result):
+        link.update(
+            {
+                "status": result.get("status", link.get("status", "search")),
+                "source": "playwright",
+                "url": result["url"],
+                "title": result.get("title", link.get("title", "")),
+            }
+        )
+
+
+def should_replace_link(link: dict, result: dict) -> bool:
+    if result.get("status") == "linked":
+        return True
+    if not link.get("url"):
+        return True
+    return link.get("source") in {"search-fallback", "playwright"} or is_generic_praktis_url(str(link.get("url", "")))
+
+
+def sanitize_resolved_links(resolved: dict[str, dict], skus: list[str]) -> None:
+    for sku in skus:
+        link = resolved.get(sku)
+        if not link:
+            continue
+        url = str(link.get("url") or "").strip()
+        if not is_generic_praktis_url(url):
+            continue
+        link.update(
+            {
+                "status": "search",
+                "source": "search-fallback",
+                "url": search_url_for_sku(sku),
+                "title": f"Praktis search for {sku}",
+                "message": "Generic Praktis link was replaced with the SKU search link.",
+            }
+        )
+
+
+def is_generic_praktis_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.netloc.lower() not in {"praktis.bg", "www.praktis.bg"}:
+        return False
+    path = parsed.path.strip("/").lower()
+    if path in {"", "bg", "en"}:
+        return True
+    return path == "catalogsearch/result" and not parsed.query
 
 
 def write_links(

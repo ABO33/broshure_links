@@ -4,6 +4,8 @@ from urllib.parse import quote, urljoin
 from urllib.request import Request, urlopen
 import re
 
+from .praktis_playwright import extract_euro_price_from_text
+
 
 BASE_URL = "https://praktis.bg"
 SEARCH_URL_TEMPLATE = "https://praktis.bg/catalogsearch/result?q={}"
@@ -200,11 +202,6 @@ def compare_website_price(resolved: dict) -> dict:
     url = resolved.get("url")
     if not url:
         return {"price_status": "no_url", "price_message": "No exact product URL is available."}
-    if resolved.get("source") == "search-fallback" or "/catalogsearch/result" in url:
-        return {
-            "price_status": "search_only",
-            "price_message": "Price comparison needs an exact product page, not a search result.",
-        }
 
     if resolved.get("website_price") is not None:
         return {"website_price": resolved["website_price"], "price_status": "website_price_found"}
@@ -221,10 +218,17 @@ def compare_website_price(resolved: dict) -> dict:
     if price is None:
         return {"price_status": "not_found", "price_message": "No website price was found on the page."}
 
-    return {"website_price": price, "price_status": "website_price_found"}
+    message = "Website price found."
+    if resolved.get("source") == "search-fallback" or "/catalogsearch/result" in url:
+        message = "First price on Praktis search result was used."
+    return {"website_price": price, "price_status": "website_price_found", "price_message": message}
 
 
 def extract_price_from_html(html: str) -> float | None:
+    euro_price = extract_euro_price_from_text(html)
+    if euro_price is not None:
+        return euro_price
+
     patterns = [
         r'"price"\s*:\s*"?([0-9]+(?:[.,][0-9]+)?)',
         r"itemprop=[\"']price[\"'][^>]*content=[\"']([0-9]+(?:[.,][0-9]+)?)",

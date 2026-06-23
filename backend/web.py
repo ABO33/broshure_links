@@ -5,6 +5,7 @@ from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import mimetypes
+import os
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -114,7 +115,14 @@ class AppHandler(BaseHTTPRequestHandler):
         print("%s - %s" % (self.address_string(), format % args))
 
 
-def run(host: str = "127.0.0.1", port: int = 5174):
+def run(host: str | None = None, port: int | None = None):
+    host = host or os.environ.get("BROCHURE_HOST", "0.0.0.0")
+    port = port or int(os.environ.get("BROCHURE_PORT", "5174"))
     server = ThreadingHTTPServer((host, port), AppHandler)
-    print(f"Praktis Brochure Linker running at http://{host}:{port}")
+    print(f"Praktis Brochure Linker listening on {host}:{port}")
+    if host == "0.0.0.0":
+        print(f"Open on this computer: http://127.0.0.1:{port}")
+        print(f"Open from another computer: http://<this-computer-ip>:{port}")
+    else:
+        print(f"Open: http://{host}:{port}")
     server.serve_forever()

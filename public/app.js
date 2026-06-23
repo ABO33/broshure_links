@@ -27,6 +27,7 @@ const labels = {
   no_brochure_price: "No brochure price",
   no_website_price: "No website price",
   not_found: "Not found",
+  playwright_unavailable: "Browser unavailable",
   website_price_found: "Website price found"
 };
 
@@ -44,7 +45,9 @@ form.addEventListener("submit", async (event) => {
 
   setBusy(true);
   downloads.hidden = true;
-  resultHint.textContent = "Reading text, detecting SKU boxes, and writing PDF links...";
+  resultHint.textContent = form.elements.comparePrices.checked
+    ? "Reading the PDF, checking Praktis euro prices, and writing links..."
+    : "Reading text, detecting SKU boxes, and writing PDF links...";
 
   try {
     const response = await fetch("/api/process", {
@@ -62,7 +65,7 @@ form.addEventListener("submit", async (event) => {
       ? "Some exact live lookups were blocked; search fallback or mapping links were used where available."
       : "Linked PDF is ready.";
   } catch (error) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="5">${escapeHtml(error.message)}</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="8">${escapeHtml(error.message)}</td></tr>`;
     resultHint.textContent = "Processing failed.";
   } finally {
     setBusy(false);
@@ -119,7 +122,7 @@ function renderSummary(summary) {
 
 function renderRows(rows) {
   if (!rows.length) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="5">No readable SKU codes were found.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="8">No readable SKU codes were found.</td></tr>`;
     return;
   }
 
