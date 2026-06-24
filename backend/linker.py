@@ -274,7 +274,8 @@ def expand_sku_fragments(word: Word, min_digits: int, max_digits: int) -> list[W
 
 def detect_boxes(pages: list[PageText], min_digits: int, max_digits: int, box_padding: float) -> list[dict]:
     detections: list[dict] = []
-    for page in pages:
+    product_pages = pages[:-1] if len(pages) > 1 else pages
+    for page in product_pages:
         detections.extend(detect_page_boxes(page, min_digits, max_digits, box_padding))
     return detections
 
