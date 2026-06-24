@@ -51,10 +51,12 @@ class PageText:
 
 
 SKU_RE = re.compile(r"\d{5,12}")
+SPLIT_SKU_TOKEN_RE = re.compile(r"^[\d,-]+$")
 HEADER_SKU_TEXT_INSET = 4.0
 HEADER_PRICE_BOX_PADDING = 6.5
 HEADER_PAGE_EDGE_TOLERANCE = 18.0
 HEADER_EDGE_TOUCH_TOLERANCE = 6.0
+HEADER_PRICE_GROUP_GAP = 68.0
 
 
 def process_brochure(
@@ -135,6 +137,7 @@ def extract_text_pages(pdf_bytes: bytes, min_digits: int = 5, max_digits: int = 
         for index, page in enumerate(pdf.pages, start=1):
             raw_words = page.extract_words(x_tolerance=1, y_tolerance=3, keep_blank_chars=False, use_text_flow=False)
             words: list[Word] = []
+            base_words: list[Word] = []
             for raw in raw_words:
                 text = str(raw.get("text", "")).strip()
                 if not text:
@@ -147,9 +150,68 @@ def extract_text_pages(pdf_bytes: bytes, min_digits: int = 5, max_digits: int = 
                     bottom=float(raw["bottom"]),
                     original_text=text,
                 )
+                base_words.append(base)
                 words.extend(expand_sku_fragments(base, min_digits, max_digits))
+            words.extend(stitch_split_sku_words(base_words, min_digits, max_digits))
             pages.append(PageText(index, float(page.width), float(page.height), words, find_footer_top(page)))
     return pages
+
+
+def stitch_split_sku_words(words: list[Word], min_digits: int, max_digits: int) -> list[Word]:
+    stitched: list[Word] = []
+    token_lines = cluster_words_by_top(
+        [
+            word
+            for word in words
+            if word.height <= 8 and SPLIT_SKU_TOKEN_RE.fullmatch(word.text)
+        ],
+        tolerance=2,
+    )
+    for line in token_lines:
+        sequence: list[Word] = []
+        previous: Word | None = None
+        for word in sorted(line, key=lambda item: item.x0):
+            gap = word.x0 - previous.x1 if previous else 0
+            if previous and gap > 4:
+                stitched.extend(build_stitched_sku(sequence, min_digits, max_digits))
+                sequence = []
+            sequence.append(word)
+            previous = word
+        stitched.extend(build_stitched_sku(sequence, min_digits, max_digits))
+    return stitched
+
+
+def build_stitched_sku(sequence: list[Word], min_digits: int, max_digits: int) -> list[Word]:
+    if len(sequence) < 2:
+        return []
+    original = "".join(word.text for word in sequence)
+    first = original.split(",", 1)[0].split("-", 1)[0].strip()
+    if not first.isdigit() or not min_digits <= len(first) <= max_digits:
+        return []
+
+    x1 = x_at_sequence_char(sequence, len(first))
+    return [
+        Word(
+            text=first,
+            x0=sequence[0].x0,
+            x1=x1,
+            top=min(word.top for word in sequence),
+            bottom=max(word.bottom for word in sequence),
+            comma_primary=True,
+            original_text=original,
+        )
+    ]
+
+
+def x_at_sequence_char(sequence: list[Word], char_count: int) -> float:
+    seen = 0
+    for word in sequence:
+        next_seen = seen + len(word.text)
+        if char_count <= next_seen:
+            inside = max(0, char_count - seen)
+            return word.x0 + word.width * (inside / max(1, len(word.text)))
+        seen = next_seen
+    return sequence[-1].x1
 
 
 def expand_sku_fragments(word: Word, min_digits: int, max_digits: int) -> list[Word]:
@@ -449,7 +511,14 @@ def find_header_price_box_right(
     if not price_words:
         return default_right_edge
 
-    right = max(word.x1 for word in price_words) + HEADER_PRICE_BOX_PADDING
+    group_right = price_word.x1
+    for word in sorted(price_words, key=lambda item: item.x0):
+        if word.x1 < price_word.x0 - 1:
+            continue
+        if word.x0 <= group_right + HEADER_PRICE_GROUP_GAP:
+            group_right = max(group_right, word.x1)
+
+    right = group_right + HEADER_PRICE_BOX_PADDING
     if default_right_edge - right <= HEADER_PAGE_EDGE_TOLERANCE:
         return default_right_edge
     return clamp(right, sku_word.x0 + 16, default_right_edge)
