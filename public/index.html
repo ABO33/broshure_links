@@ -10,10 +10,8 @@
     <main class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">Python PDF linker</p>
           <h1>Praktis Brochure Linker</h1>
         </div>
-        <span id="healthPill" class="pill">Checking backend</span>
       </header>
 
       <form id="processForm" class="layout">
@@ -28,14 +26,6 @@
               <small>Required</small>
             </span>
             <input id="pdfInput" name="pdf" type="file" accept="application/pdf,.pdf" required>
-          </label>
-
-          <label class="file-line" for="mappingInput">
-            <span>
-              <strong>SKU mapping</strong>
-              <small id="mappingLabel">Optional CSV or JSON with sku,url,title.</small>
-            </span>
-            <input id="mappingInput" name="mapping" type="file" accept=".csv,.json,application/json,text/csv">
           </label>
 
           <div class="settings">
@@ -113,22 +103,90 @@
 
           <div id="downloads" class="downloads" hidden>
             <button id="downloadPdf" type="button">Download PDF</button>
-            <button id="downloadCsv" type="button">Download CSV</button>
+            <button id="downloadExcel" type="button">Export Excel</button>
             <button id="downloadJson" type="button">Download JSON</button>
           </div>
 
           <div class="table-wrap">
-            <table>
+            <table id="resultsTable">
+              <colgroup>
+                <col class="col-page">
+                <col class="col-sku">
+                <col class="col-status">
+                <col class="col-box">
+                <col class="col-brochure">
+                <col class="col-website">
+                <col class="col-price-check">
+                <col class="col-url">
+              </colgroup>
               <thead>
                 <tr>
-                  <th>Page</th>
-                  <th>SKU</th>
-                  <th>Status</th>
-                  <th>Box</th>
-                  <th>Brochure price</th>
-                  <th>Website price</th>
-                  <th>Price check</th>
-                  <th>URL</th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Page</span>
+                      <span class="filter-field">
+                        <input id="pageFilter" class="column-filter" data-query-key="page" type="search" placeholder="Page" autocomplete="off">
+                      </span>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">SKU</span>
+                      <span class="filter-field">
+                        <input id="skuFilter" class="column-filter" data-query-key="sku" type="search" placeholder="SKU" autocomplete="off">
+                      </span>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Status</span>
+                      <button id="statusFilterButton" class="filter-trigger" type="button" data-filter="status" aria-expanded="false">
+                        <span class="filter-value">All</span>
+                        <span class="filter-mark"></span>
+                      </button>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Box</span>
+                      <span class="filter-field">
+                        <input id="boxFilter" class="column-filter" data-query-key="box_type" type="search" placeholder="Box" autocomplete="off">
+                      </span>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Brochure price</span>
+                      <span class="filter-field">
+                        <input id="brochureFilter" class="column-filter" data-query-key="brochure_price" type="search" placeholder="Price" autocomplete="off">
+                      </span>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Website price</span>
+                      <span class="filter-field">
+                        <input id="websiteFilter" class="column-filter" data-query-key="website_price" type="search" placeholder="Price" autocomplete="off">
+                      </span>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Price check</span>
+                      <button id="priceFilterButton" class="filter-trigger" type="button" data-filter="price_status" aria-expanded="false">
+                        <span class="filter-value">All</span>
+                        <span class="filter-mark"></span>
+                      </button>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">URL</span>
+                      <span class="filter-field">
+                        <input id="urlFilter" class="column-filter" data-query-key="url" type="search" placeholder="URL" autocomplete="off">
+                      </span>
+                    </div>
+                  </th>
                 </tr>
               </thead>
               <tbody id="resultsBody">
@@ -136,6 +194,7 @@
               </tbody>
             </table>
           </div>
+          <div id="columnFilterMenu" class="column-menu" hidden></div>
         </section>
       </form>
     </main>
