@@ -137,7 +137,7 @@ def resolve_skus(skus: list[str], mapping: dict[str, dict], live_lookup: bool, f
             resolved[sku] = {
                 **resolved[sku],
                 "sku": sku,
-                "status": "search",
+                "status": "search_only",
                 "url": search_url_for_sku(sku),
                 "title": f"Praktis search for {sku}",
                 "source": "search-fallback",

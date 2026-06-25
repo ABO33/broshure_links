@@ -111,6 +111,21 @@ small {
   cursor: pointer;
 }
 
+.compact-dropzone {
+  min-height: 88px;
+  margin-top: 10px;
+}
+
+.sheet-icon {
+  border-top-color: var(--ok);
+  color: var(--ok);
+}
+
+.dropzone.is-required {
+  border-color: rgba(239, 139, 24, 0.75);
+  background: #fffaf4;
+}
+
 .dropzone:hover {
   border-color: var(--accent);
 }
@@ -155,6 +170,23 @@ small {
   margin: 18px 0;
 }
 
+.mode-group {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.mode-group legend {
+  margin-bottom: 2px;
+  color: #263846;
+  font-size: 13px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .toggle {
   display: grid;
   grid-template-columns: 20px 1fr;
@@ -163,6 +195,28 @@ small {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-soft);
+}
+
+.compact-toggle {
+  padding: 10px 12px;
+}
+
+.page-number-toggle small {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.page-number-toggle input[type="number"] {
+  width: min(170px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #fff;
+}
+
+.page-number-toggle input[type="number"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .toggle input {
@@ -250,7 +304,7 @@ small {
 
 .summary {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(7, 1fr);
   gap: 10px;
   margin-bottom: 16px;
 }
@@ -298,7 +352,7 @@ small {
 
 table {
   width: 100%;
-  min-width: 1080px;
+  min-width: 1370px;
   border-collapse: collapse;
   font-size: 13px;
   table-layout: fixed;
@@ -321,16 +375,19 @@ table {
 }
 
 .col-brochure,
-.col-website {
+.col-website,
+.col-excel {
   width: 112px;
 }
 
-.col-price-check {
+.col-price-check,
+.col-excel-check,
+.col-triple-check {
   width: 126px;
 }
 
 .col-url {
-  width: 348px;
+  width: 300px;
 }
 
 th,
@@ -589,9 +646,12 @@ tbody tr:last-child td {
 .badge.search,
 .badge.blocked,
 .badge.search_only,
+.badge.link_not_found,
+.badge.price_only,
 .badge.no_url,
 .badge.no_brochure_price,
 .badge.no_website_price,
+.badge.no_excel_price,
 .badge.not_found {
   color: var(--warn);
   background: rgba(153, 94, 0, 0.1);

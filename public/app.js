@@ -1,6 +1,11 @@
 const form = document.querySelector("#processForm");
 const pdfInput = document.querySelector("#pdfInput");
 const pdfLabel = document.querySelector("#pdfLabel");
+const excelInput = document.querySelector("#excelInput");
+const excelLabel = document.querySelector("#excelLabel");
+const modeInputs = [...document.querySelectorAll("input[name='mode']")];
+const pageModeInputs = [...document.querySelectorAll("input[name='pageMode']")];
+const pageNumberInput = document.querySelector("#pageNumberInput");
 const progress = document.querySelector("#progress");
 const processButton = document.querySelector("#processButton");
 const summaryGrid = document.querySelector("#summaryGrid");
@@ -8,9 +13,11 @@ const resultsBody = document.querySelector("#resultsBody");
 const downloads = document.querySelector("#downloads");
 const resultHint = document.querySelector("#resultHint");
 const textFilterInputs = [...document.querySelectorAll(".column-filter[data-query-key]")];
-const statusFilterButton = document.querySelector("#statusFilterButton");
-const priceFilterButton = document.querySelector("#priceFilterButton");
 const columnFilterMenu = document.querySelector("#columnFilterMenu");
+const choiceFilterKeys = ["status", "price_status", "excel_status", "triple_status"];
+const filterButtons = Object.fromEntries(
+  [...document.querySelectorAll(".filter-trigger[data-filter]")].map((button) => [button.dataset.filter, button])
+);
 
 let lastResult = null;
 let activeFilter = null;
@@ -22,35 +29,34 @@ const tableState = {
     box_type: "",
     brochure_price: "",
     website_price: "",
+    excel_price: "",
     url: ""
   },
   sort: { key: "", direction: "asc" },
-  menuSearch: { status: "", price_status: "" },
-  filters: { status: null, price_status: null }
+  menuSearch: Object.fromEntries(choiceFilterKeys.map((key) => [key, ""])),
+  filters: Object.fromEntries(choiceFilterKeys.map((key) => [key, null]))
 };
 
 const labels = {
   mapped: "Mapped",
   linked: "Linked",
   search: "Search",
+  search_only: "Search only",
+  link_not_found: "Link not found",
+  price_only: "Price only",
   blocked: "Blocked",
   unresolved: "Unresolved",
   error: "Error",
   match: "Match",
   different: "Different",
-  search_only: "Search only",
   no_url: "No URL",
   no_brochure_price: "No brochure price",
   no_website_price: "No website price",
+  no_excel_price: "No Excel price",
   not_found: "Not found",
   not_checked: "Not checked",
   playwright_unavailable: "Browser unavailable",
   website_price_found: "Website price found"
-};
-
-const filterButtons = {
-  status: statusFilterButton,
-  price_status: priceFilterButton
 };
 
 const excelColumns = [
@@ -60,13 +66,25 @@ const excelColumns = [
   ["box_type", "Box"],
   ["brochure_price", "Brochure price"],
   ["website_price", "Website price"],
-  ["price_status", "Price check"],
+  ["excel_price", "Excel price"],
+  ["price_status", "Website check"],
+  ["excel_status", "Excel check"],
+  ["triple_status", "Triple check"],
   ["url", "URL"]
 ];
 
 pdfInput.addEventListener("change", () => {
   pdfLabel.textContent = pdfInput.files[0]?.name || "Choose brochure PDF";
 });
+
+excelInput.addEventListener("change", () => {
+  excelLabel.textContent = excelInput.files[0]?.name || "Choose price Excel";
+});
+
+modeInputs.forEach((input) => input.addEventListener("change", updateModeState));
+pageModeInputs.forEach((input) => input.addEventListener("change", updatePageScopeState));
+updateModeState();
+updatePageScopeState();
 
 textFilterInputs.forEach((input) => {
   input.addEventListener("input", () => {
@@ -84,13 +102,21 @@ form.addEventListener("keydown", (event) => {
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!pdfInput.files[0]) return;
+  if (modeNeedsExcel(getSelectedMode()) && !excelInput.files[0]) {
+    resultHint.textContent = "Upload an Excel .xlsx file for the selected price check mode.";
+    excelInput.focus();
+    return;
+  }
+  if (getSelectedPageMode() === "single" && !pageNumberInput.value) {
+    resultHint.textContent = "Enter the page number you want to process.";
+    pageNumberInput.focus();
+    return;
+  }
 
   setBusy(true);
   closeColumnMenu();
   downloads.hidden = true;
-  resultHint.textContent = form.elements.comparePrices.checked
-    ? "Reading the PDF, checking Praktis euro prices, and writing links..."
-    : "Reading text, detecting SKU boxes, and writing PDF links...";
+  resultHint.textContent = processingMessage(getSelectedMode());
 
   try {
     const response = await fetch("/api/process", {
@@ -107,7 +133,7 @@ form.addEventListener("submit", async (event) => {
     downloads.hidden = !payload.pdfBase64;
     resultHint.textContent = payload.summary.blockedLookups
       ? "Some exact live lookups were blocked; search fallback links were used where available."
-      : "Linked PDF is ready.";
+      : completionMessage(payload.summary.mode);
   } catch (error) {
     lastResult = null;
     resultsBody.innerHTML = `<tr class="empty"><td colspan="8">${escapeHtml(error.message)}</td></tr>`;
@@ -211,8 +237,8 @@ function resetTableState() {
     tableState.textFilters[key] = "";
   });
   tableState.sort = { key: "", direction: "asc" };
-  tableState.menuSearch = { status: "", price_status: "" };
-  tableState.filters = { status: null, price_status: null };
+  tableState.menuSearch = Object.fromEntries(choiceFilterKeys.map((key) => [key, ""]));
+  tableState.filters = Object.fromEntries(choiceFilterKeys.map((key) => [key, null]));
   textFilterInputs.forEach((input) => {
     input.value = "";
   });
@@ -225,12 +251,52 @@ function setBusy(isBusy) {
   progress.hidden = !isBusy;
 }
 
+function updateModeState() {
+  const needsExcel = modeNeedsExcel(getSelectedMode());
+  excelInput.required = needsExcel;
+  excelInput.closest(".dropzone").classList.toggle("is-required", needsExcel);
+}
+
+function updatePageScopeState() {
+  const singlePage = getSelectedPageMode() === "single";
+  pageNumberInput.disabled = !singlePage;
+  pageNumberInput.required = singlePage;
+}
+
+function getSelectedMode() {
+  return modeInputs.find((input) => input.checked)?.value || "fallback_links";
+}
+
+function getSelectedPageMode() {
+  return pageModeInputs.find((input) => input.checked)?.value || "all";
+}
+
+function modeNeedsExcel(mode) {
+  return mode === "excel_prices" || mode === "full_check";
+}
+
+function processingMessage(mode) {
+  if (mode === "website_links_prices") return "Reading the PDF, checking Praktis links and euro prices...";
+  if (mode === "excel_prices") return "Reading the PDF and comparing brochure prices with Excel...";
+  if (mode === "full_check") return "Reading the PDF, checking Praktis links, and comparing PDF, Excel, and website prices...";
+  return "Reading text, detecting SKU boxes, and writing SKU search links...";
+}
+
+function completionMessage(mode) {
+  if (mode === "excel_prices") return "Excel price report is ready.";
+  if (mode === "full_check") return "Linked PDF and triple price report are ready.";
+  if (mode === "website_links_prices") return "Linked PDF and website price report are ready.";
+  return "Search-link PDF is ready.";
+}
+
 function renderSummary(summary) {
   const values = [
     [summary.uniqueSkus, "SKUs"],
+    [summary.variantRows ?? 0, "Variants"],
     [summary.linkedAnnotations, "Links"],
-    [summary.unresolvedSkus, "Unresolved"],
-    [summary.priceDifferent ?? 0, "Price diffs"],
+    [summary.priceDifferent ?? 0, "Website diffs"],
+    [summary.excelDifferent ?? 0, "Excel diffs"],
+    [summary.tripleDifferent ?? 0, "Triple diffs"],
     [summary.pages, "Pages"]
   ];
   summaryGrid.innerHTML = values
@@ -243,17 +309,17 @@ function renderRows() {
 
   const rows = getVisibleRows();
   if (!lastResult) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="8">No file processed yet.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="11">No file processed yet.</td></tr>`;
     return;
   }
 
   if (!lastResult?.rows?.length) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="8">No readable SKU codes were found.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="11">No readable SKU codes were found.</td></tr>`;
     return;
   }
 
   if (!rows.length) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="8">No rows match the current filters.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="11">No rows match the current filters.</td></tr>`;
     return;
   }
 
@@ -262,7 +328,9 @@ function renderRows() {
 
 function rowToHtml(row) {
   const status = getStatusValue(row);
-  const priceStatus = getPriceStatusValue(row);
+  const priceStatus = getChoiceStatusValue(row, "price_status");
+  const excelStatus = getChoiceStatusValue(row, "excel_status");
+  const tripleStatus = getChoiceStatusValue(row, "triple_status");
   const url = row.url
     ? `<a href="${escapeAttr(row.url)}" target="_blank" rel="noreferrer">${escapeHtml(row.title || row.url)}</a>`
     : `<span>${escapeHtml(row.message || "No link")}</span>`;
@@ -275,7 +343,10 @@ function rowToHtml(row) {
       <td>${escapeHtml(row.box_type)}</td>
       <td>${formatPrice(row.brochure_price)}</td>
       <td>${formatPrice(row.website_price)}</td>
+      <td>${formatPrice(row.excel_price)}</td>
       <td title="${escapeAttr(row.price_message || "")}">${priceStatus === "not_checked" ? `<span class="muted-cell">Not checked</span>` : badgeHtml(priceStatus)}</td>
+      <td title="${escapeAttr(row.excel_message || "")}">${excelStatus === "not_checked" ? `<span class="muted-cell">Not checked</span>` : badgeHtml(excelStatus)}</td>
+      <td title="${escapeAttr(row.triple_message || "")}">${tripleStatus === "not_checked" ? `<span class="muted-cell">Not checked</span>` : badgeHtml(tripleStatus)}</td>
       <td class="url-cell">${url}</td>
     </tr>
   `;
@@ -290,7 +361,7 @@ function getVisibleRows() {
     rows = rows.filter((row) => getTextFilterValue(row, key).toLowerCase().includes(query));
   }
 
-  for (const key of ["status", "price_status"]) {
+  for (const key of choiceFilterKeys) {
     const selected = tableState.filters[key];
     if (selected) {
       rows = rows.filter((row) => selected.has(getFilterValue(row, key)));
@@ -305,7 +376,7 @@ function getVisibleRows() {
 }
 
 function getTextFilterValue(row, key) {
-  if (key === "brochure_price" || key === "website_price") return formatPrice(row[key]);
+  if (key === "brochure_price" || key === "website_price" || key === "excel_price") return formatPrice(row[key]);
   if (key === "url") return [row.url, row.title, row.message].filter(Boolean).join(" ");
   return String(row[key] ?? "");
 }
@@ -413,7 +484,7 @@ function getSelectedValues(key) {
 
 function getFilterValue(row, key) {
   if (key === "status") return getStatusValue(row);
-  if (key === "price_status") return getPriceStatusValue(row);
+  if (choiceFilterKeys.includes(key)) return getChoiceStatusValue(row, key);
   return "";
 }
 
@@ -421,8 +492,8 @@ function getStatusValue(row) {
   return row.status || "unresolved";
 }
 
-function getPriceStatusValue(row) {
-  return row.price_status || "not_checked";
+function getChoiceStatusValue(row, key) {
+  return row[key] || "not_checked";
 }
 
 function getFilterLabel(key, value) {
@@ -479,30 +550,15 @@ function buildWorksheetXml(rows, hyperlinks) {
   const body = rows
     .map((row, index) => {
       const rowNumber = index + 2;
-      const status = getStatusValue(row);
-      const priceStatus = getPriceStatusValue(row);
-      const urlText = row.url ? row.title || row.url : row.message || "No link";
-      const cells = [
-        numberCell("A", rowNumber, row.page, 2),
-        cell("B", rowNumber, row.sku, 2),
-        cell("C", rowNumber, labels[status] || status, excelStatusStyle(status)),
-        cell("D", rowNumber, row.box_type, 2),
-        numberCell("E", rowNumber, row.brochure_price, 3),
-        numberCell("F", rowNumber, row.website_price, 3),
-        cell(
-          "G",
-          rowNumber,
-          priceStatus === "not_checked" ? "Not checked" : labels[priceStatus] || priceStatus,
-          priceStatus === "not_checked" ? 7 : excelStatusStyle(priceStatus)
-        ),
-        cell("H", rowNumber, urlText, row.url ? 8 : 7)
-      ];
+      const cells = excelColumns
+        .map(([key], columnIndex) => excelCellForColumn(key, columnIndex + 1, rowNumber, row, hyperlinks))
+        .join("");
 
       if (row.url) {
-        hyperlinks.push({ ref: `H${rowNumber}`, target: row.url });
+        hyperlinks.push({ ref: `${columnName(excelColumns.length)}${rowNumber}`, target: row.url });
       }
 
-      return `<row r="${rowNumber}" ht="24" customHeight="1">${cells.join("")}</row>`;
+      return `<row r="${rowNumber}" ht="24" customHeight="1">${cells}</row>`;
     })
     .join("");
   const hyperlinkXml = hyperlinks.length
@@ -518,9 +574,9 @@ function buildWorksheetXml(rows, hyperlinks) {
     <col min="2" max="2" width="14" customWidth="1"/>
     <col min="3" max="3" width="16" customWidth="1"/>
     <col min="4" max="4" width="12" customWidth="1"/>
-    <col min="5" max="6" width="16" customWidth="1"/>
-    <col min="7" max="7" width="18" customWidth="1"/>
-    <col min="8" max="8" width="46" customWidth="1"/>
+    <col min="5" max="7" width="16" customWidth="1"/>
+    <col min="8" max="10" width="18" customWidth="1"/>
+    <col min="11" max="11" width="46" customWidth="1"/>
   </cols>
   <sheetData>
     <row r="1" ht="24" customHeight="1">${header}</row>
@@ -528,6 +584,31 @@ function buildWorksheetXml(rows, hyperlinks) {
   </sheetData>
   ${hyperlinkXml}
 </worksheet>`;
+}
+
+function excelCellForColumn(key, columnIndex, rowNumber, row) {
+  const column = columnName(columnIndex);
+  if (key === "page") return numberCell(column, rowNumber, row.page, 2);
+  if (["brochure_price", "website_price", "excel_price"].includes(key)) {
+    return numberCell(column, rowNumber, row[key], 3);
+  }
+  if (key === "status") {
+    const status = getStatusValue(row);
+    return cell(column, rowNumber, labels[status] || status, excelStatusStyle(status));
+  }
+  if (["price_status", "excel_status", "triple_status"].includes(key)) {
+    const status = getChoiceStatusValue(row, key);
+    return cell(
+      column,
+      rowNumber,
+      status === "not_checked" ? "Not checked" : labels[status] || status,
+      status === "not_checked" ? 7 : excelStatusStyle(status)
+    );
+  }
+  if (key === "url") {
+    return cell(column, rowNumber, row.url ? row.title || row.url : row.message || "No link", row.url ? 8 : 7);
+  }
+  return cell(column, rowNumber, row[key], 2);
 }
 
 function cell(column, row, value, style) {

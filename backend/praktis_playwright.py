@@ -40,6 +40,9 @@ def compare_prices_with_playwright(skus: list[str]) -> dict[str, dict]:
         return {
             sku: {
                 "sku": sku,
+                "status": "error",
+                "url": SEARCH_URL_TEMPLATE.format(quote(sku)),
+                "title": f"Praktis search for {sku}",
                 "price_status": "playwright_unavailable",
                 "price_message": "Install Playwright to use Praktis browser price checks.",
             }
@@ -53,6 +56,9 @@ def compare_prices_with_playwright(skus: list[str]) -> dict[str, dict]:
         return {
             sku: {
                 "sku": sku,
+                "status": "error",
+                "url": SEARCH_URL_TEMPLATE.format(quote(sku)),
+                "title": f"Praktis search for {sku}",
                 "price_status": "error",
                 "price_message": message[:300],
             }
@@ -119,7 +125,7 @@ async def _scrape_one_sku(context, sku: str, sem: asyncio.Semaphore) -> dict:
             if await _looks_blocked(page, status_code):
                 return {
                     "sku": sku,
-                    "status": "search",
+                    "status": "blocked",
                     "source": "playwright",
                     "url": search_url,
                     "title": f"Praktis search for {sku}",
@@ -160,7 +166,7 @@ async def _scrape_one_sku(context, sku: str, sem: asyncio.Semaphore) -> dict:
 
             return {
                 "sku": sku,
-                "status": "search",
+                "status": "not_found",
                 "source": "playwright",
                 "url": search_url,
                 "title": f"Praktis search for {sku}",
@@ -171,7 +177,7 @@ async def _scrape_one_sku(context, sku: str, sem: asyncio.Semaphore) -> dict:
         except PlaywrightTimeoutError as exc:
             return {
                 "sku": sku,
-                "status": "search",
+                "status": "error",
                 "source": "playwright",
                 "url": search_url,
                 "title": f"Praktis search for {sku}",
@@ -181,7 +187,7 @@ async def _scrape_one_sku(context, sku: str, sem: asyncio.Semaphore) -> dict:
         except Exception as exc:
             return {
                 "sku": sku,
-                "status": "search",
+                "status": "error",
                 "source": "playwright",
                 "url": search_url,
                 "title": f"Praktis search for {sku}",
@@ -196,7 +202,7 @@ def _success_result(sku: str, url: str, title: str, price: float | None, used_se
     safe_url = url if _is_product_url(url) or _is_search_url(url) else SEARCH_URL_TEMPLATE.format(quote(sku))
     result = {
         "sku": sku,
-        "status": "linked" if _is_product_url(safe_url) else "search",
+        "status": "linked" if _is_product_url(safe_url) else "link_not_found",
         "source": "playwright",
         "url": safe_url,
         "title": title or f"Praktis result for {sku}",

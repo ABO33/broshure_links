@@ -28,36 +28,75 @@
             <input id="pdfInput" name="pdf" type="file" accept="application/pdf,.pdf" required>
           </label>
 
-          <div class="settings">
-            <label class="toggle">
-              <input name="liveLookup" type="checkbox">
-              <span>
-                <strong>Try exact live lookup</strong>
-                <small>Checks Praktis result pages and product pages when access is allowed.</small>
-              </span>
-            </label>
+          <label class="dropzone compact-dropzone" for="excelInput">
+            <span class="file-icon sheet-icon">XLSX</span>
+            <span>
+              <strong id="excelLabel">Choose price Excel</strong>
+              <small>Required for Excel price modes</small>
+            </span>
+            <input id="excelInput" name="excel" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+          </label>
 
-            <label class="toggle">
-              <input name="fallbackSearch" type="checkbox" checked>
-              <span>
-                <strong>Use Praktis search fallback</strong>
-                <small>Creates links like https://praktis.bg/catalogsearch/result?q=SKU.</small>
-              </span>
-            </label>
+          <div class="settings">
+            <fieldset class="mode-group">
+              <legend>Options</legend>
+              <label class="toggle">
+                <input name="mode" type="radio" value="fallback_links" checked>
+                <span>
+                  <strong>Fallback search</strong>
+                  <small>Places only SKU search URLs in the PDF.</small>
+                </span>
+              </label>
+
+              <label class="toggle">
+                <input name="mode" type="radio" value="website_links_prices">
+                <span>
+                  <strong>Website Link Search with prices</strong>
+                  <small>Finds Praktis product links, compares PDF and website euro prices, and falls back to SKU search.</small>
+                </span>
+              </label>
+
+              <label class="toggle">
+                <input name="mode" type="radio" value="excel_prices">
+                <span>
+                  <strong>Prices search with Excel file</strong>
+                  <small>Compares PDF and Excel prices without placing links.</small>
+                </span>
+              </label>
+
+              <label class="toggle">
+                <input name="mode" type="radio" value="full_check">
+                <span>
+                  <strong>Link placement with Excel and website check</strong>
+                  <small>Places website/search links and compares PDF, Excel, and website prices.</small>
+                </span>
+              </label>
+            </fieldset>
+
+            <fieldset class="mode-group page-scope">
+              <legend>Pages to process</legend>
+              <label class="toggle compact-toggle">
+                <input name="pageMode" type="radio" value="all" checked>
+                <span>
+                  <strong>Whole file</strong>
+                  <small>Processes every product page.</small>
+                </span>
+              </label>
+              <label class="toggle compact-toggle page-number-toggle">
+                <input name="pageMode" type="radio" value="single">
+                <span>
+                  <strong>One page</strong>
+                  <small>Only detects, links, and checks this page.</small>
+                  <input id="pageNumberInput" name="pageNumber" type="number" min="1" step="1" placeholder="Page number" disabled>
+                </span>
+              </label>
+            </fieldset>
 
             <label class="toggle">
               <input name="debugBoxes" type="checkbox">
               <span>
                 <strong>Draw debug boxes</strong>
                 <small>Useful when checking link area placement on a new brochure.</small>
-              </span>
-            </label>
-
-            <label class="toggle">
-              <input name="comparePrices" type="checkbox">
-              <span>
-                <strong>Compare brochure and website price</strong>
-                <small>Uses the first euro price found on the exact product page or SKU search result.</small>
               </span>
             </label>
 
@@ -95,9 +134,11 @@
 
           <div id="summaryGrid" class="summary">
             <div><strong>0</strong><span>SKUs</span></div>
+            <div><strong>0</strong><span>Variants</span></div>
             <div><strong>0</strong><span>Links</span></div>
-            <div><strong>0</strong><span>Unresolved</span></div>
-            <div><strong>0</strong><span>Price diffs</span></div>
+            <div><strong>0</strong><span>Website diffs</span></div>
+            <div><strong>0</strong><span>Excel diffs</span></div>
+            <div><strong>0</strong><span>Triple diffs</span></div>
             <div><strong>0</strong><span>Pages</span></div>
           </div>
 
@@ -116,7 +157,10 @@
                 <col class="col-box">
                 <col class="col-brochure">
                 <col class="col-website">
+                <col class="col-excel">
                 <col class="col-price-check">
+                <col class="col-excel-check">
+                <col class="col-triple-check">
                 <col class="col-url">
               </colgroup>
               <thead>
@@ -172,8 +216,34 @@
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Price check</span>
+                      <span class="th-label">Excel price</span>
+                      <span class="filter-field">
+                        <input id="excelPriceFilter" class="column-filter" data-query-key="excel_price" type="search" placeholder="Price" autocomplete="off">
+                      </span>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Website check</span>
                       <button id="priceFilterButton" class="filter-trigger" type="button" data-filter="price_status" aria-expanded="false">
+                        <span class="filter-value">All</span>
+                        <span class="filter-mark"></span>
+                      </button>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Excel check</span>
+                      <button id="excelFilterButton" class="filter-trigger" type="button" data-filter="excel_status" aria-expanded="false">
+                        <span class="filter-value">All</span>
+                        <span class="filter-mark"></span>
+                      </button>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Triple check</span>
+                      <button id="tripleFilterButton" class="filter-trigger" type="button" data-filter="triple_status" aria-expanded="false">
                         <span class="filter-value">All</span>
                         <span class="filter-mark"></span>
                       </button>
@@ -190,7 +260,7 @@
                 </tr>
               </thead>
               <tbody id="resultsBody">
-                <tr class="empty"><td colspan="8">No file processed yet.</td></tr>
+                <tr class="empty"><td colspan="11">No file processed yet.</td></tr>
               </tbody>
             </table>
           </div>

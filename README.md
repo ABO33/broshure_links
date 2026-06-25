@@ -40,16 +40,18 @@ python app.py --port 8080
 ## What It Does
 
 - Upload a brochure PDF.
+- Process the whole brochure or only one selected page.
 - Extract readable text-layer SKUs from 5 to 12 digits.
 - Skip SKU codes that are only inside images.
 - If a SKU line contains comma-separated values, only the first value before the comma is used.
-- Variant SKU tables are ignored; the link is placed on the main product item only.
+- Variant SKU tables are included in the report for price comparison; they do not create separate PDF link boxes.
 - Resolve URLs from an optional CSV/JSON mapping file.
-- Optionally try exact live Praktis lookup.
-- Fall back to `https://praktis.bg/catalogsearch/result?q={sku}` when enabled.
-- Optionally compare the brochure euro price with the Praktis euro price using a Playwright-controlled Chrome session.
+- Fall back to `https://praktis.bg/catalogsearch/result?q={sku}` when selected.
+- Optionally find Praktis product links and compare the brochure euro price with the Praktis euro price using a Playwright-controlled Chrome session.
+- Optionally upload an `.xlsx` price file and compare brochure prices with Excel column M SKUs and column U prices.
+- Optionally run a triple check across brochure, Praktis website, and Excel prices.
 - Write invisible PDF link annotations over detected item boxes.
-- Download the linked PDF plus CSV/JSON reports.
+- Download the linked PDF plus Excel/JSON reports.
 
 ## Mapping File
 
@@ -91,5 +93,6 @@ debugging.
 
 If the browser lookup cannot load or verify an exact product page, the generated
 PDF uses the SKU search URL, for example
-`https://praktis.bg/catalogsearch/result?q=35535079`. A generic
+`https://praktis.bg/catalogsearch/result?q=35535079`, and the report status is
+flagged as blocked, not found, error, or link not found. A generic
 `https://praktis.bg/` homepage link is rejected before PDF links are written.
