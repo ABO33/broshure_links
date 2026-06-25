@@ -125,8 +125,7 @@ document.querySelector("#downloadPdf").addEventListener("click", () => {
 document.querySelector("#downloadExcel").addEventListener("click", () => {
   if (!lastResult?.rows) return;
   const rows = getVisibleRows();
-  const blob = new Blob([toExcelHtml(rows)], { type: "application/vnd.ms-excel;charset=utf-8" });
-  downloadBlob(blob, "brochure-link-report.xls");
+  downloadBlob(toXlsxBlob(rows), "brochure-link-report.xlsx");
 });
 
 document.querySelector("#downloadJson").addEventListener("click", () => {
@@ -452,64 +451,336 @@ function badgeHtml(value) {
   return `<span class="badge ${escapeAttr(value)}">${escapeHtml(labels[value] || value)}</span>`;
 }
 
-function toExcelHtml(rows) {
-  const headerHtml = excelColumns.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("");
-  const bodyHtml = rows
-    .map(
-      (row) => `
-        <tr>
-          <td>${row.page ?? ""}</td>
-          <td>${escapeHtml(row.sku)}</td>
-          <td>${excelBadgeHtml(getStatusValue(row))}</td>
-          <td>${escapeHtml(row.box_type)}</td>
-          <td class="number">${formatPrice(row.brochure_price)}</td>
-          <td class="number">${formatPrice(row.website_price)}</td>
-          <td>${getPriceStatusValue(row) === "not_checked" ? `<span class="muted-cell">Not checked</span>` : excelBadgeHtml(getPriceStatusValue(row))}</td>
-          <td>${excelUrlHtml(row)}</td>
-        </tr>
-      `
-    )
+function toXlsxBlob(rows) {
+  const hyperlinks = [];
+  const sheetXml = buildWorksheetXml(rows, hyperlinks);
+  const files = [
+    ["[Content_Types].xml", contentTypesXml()],
+    ["_rels/.rels", rootRelsXml()],
+    ["docProps/app.xml", appPropsXml()],
+    ["docProps/core.xml", corePropsXml()],
+    ["xl/workbook.xml", workbookXml()],
+    ["xl/_rels/workbook.xml.rels", workbookRelsXml()],
+    ["xl/styles.xml", stylesXml()],
+    ["xl/worksheets/sheet1.xml", sheetXml]
+  ];
+
+  if (hyperlinks.length) {
+    files.push(["xl/worksheets/_rels/sheet1.xml.rels", worksheetRelsXml(hyperlinks)]);
+  }
+
+  return new Blob([zipStore(files)], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
+}
+
+function buildWorksheetXml(rows, hyperlinks) {
+  const header = excelColumns.map(([, label], index) => cell(columnName(index + 1), 1, label, 1)).join("");
+  const body = rows
+    .map((row, index) => {
+      const rowNumber = index + 2;
+      const status = getStatusValue(row);
+      const priceStatus = getPriceStatusValue(row);
+      const urlText = row.url ? row.title || row.url : row.message || "No link";
+      const cells = [
+        numberCell("A", rowNumber, row.page, 2),
+        cell("B", rowNumber, row.sku, 2),
+        cell("C", rowNumber, labels[status] || status, excelStatusStyle(status)),
+        cell("D", rowNumber, row.box_type, 2),
+        numberCell("E", rowNumber, row.brochure_price, 3),
+        numberCell("F", rowNumber, row.website_price, 3),
+        cell(
+          "G",
+          rowNumber,
+          priceStatus === "not_checked" ? "Not checked" : labels[priceStatus] || priceStatus,
+          priceStatus === "not_checked" ? 7 : excelStatusStyle(priceStatus)
+        ),
+        cell("H", rowNumber, urlText, row.url ? 8 : 7)
+      ];
+
+      if (row.url) {
+        hyperlinks.push({ ref: `H${rowNumber}`, target: row.url });
+      }
+
+      return `<row r="${rowNumber}" ht="24" customHeight="1">${cells.join("")}</row>`;
+    })
     .join("");
+  const hyperlinkXml = hyperlinks.length
+    ? `<hyperlinks>${hyperlinks.map((link, index) => `<hyperlink ref="${link.ref}" r:id="rId${index + 1}"/>`).join("")}</hyperlinks>`
+    : "";
 
-  return `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <style>
-      table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px; }
-      th { background: #f3f6f8; color: #44525d; font-weight: 700; text-transform: uppercase; }
-      th, td { border: 1px solid #d8e1e7; padding: 8px 10px; vertical-align: top; }
-      .number { mso-number-format: "0.00"; }
-      .badge { font-weight: 700; border-radius: 6px; padding: 3px 8px; display: inline-block; }
-      .ok { color: #177a55; background: #e7f3ee; }
-      .warn { color: #995e00; background: #f7eddf; }
-      .bad { color: #a73333; background: #f6e7e7; }
-      .muted-cell { color: #64727d; }
-      a { color: #245fe0; }
-    </style>
-  </head>
-  <body>
-    <table>
-      <thead><tr>${headerHtml}</tr></thead>
-      <tbody>${bodyHtml}</tbody>
-    </table>
-  </body>
-</html>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetViews><sheetView workbookViewId="0" showGridLines="1"/></sheetViews>
+  <sheetFormatPr defaultRowHeight="18"/>
+  <cols>
+    <col min="1" max="1" width="9" customWidth="1"/>
+    <col min="2" max="2" width="14" customWidth="1"/>
+    <col min="3" max="3" width="16" customWidth="1"/>
+    <col min="4" max="4" width="12" customWidth="1"/>
+    <col min="5" max="6" width="16" customWidth="1"/>
+    <col min="7" max="7" width="18" customWidth="1"/>
+    <col min="8" max="8" width="46" customWidth="1"/>
+  </cols>
+  <sheetData>
+    <row r="1" ht="24" customHeight="1">${header}</row>
+    ${body}
+  </sheetData>
+  ${hyperlinkXml}
+</worksheet>`;
 }
 
-function excelBadgeHtml(value) {
-  return `<span class="badge ${excelBadgeTone(value)}">${escapeHtml(labels[value] || value)}</span>`;
+function cell(column, row, value, style) {
+  return `<c r="${column}${row}" s="${style}" t="inlineStr"><is><t>${xmlText(value)}</t></is></c>`;
 }
 
-function excelBadgeTone(value) {
-  if (["mapped", "linked", "match", "website_price_found"].includes(value)) return "ok";
-  if (["error", "unresolved", "different"].includes(value)) return "bad";
-  return "warn";
+function numberCell(column, row, value, style) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return cell(column, row, "", 2);
+  return `<c r="${column}${row}" s="${style}"><v>${number}</v></c>`;
 }
 
-function excelUrlHtml(row) {
-  if (!row.url) return escapeHtml(row.message || "No link");
-  return `<a href="${escapeAttr(row.url)}">${escapeHtml(row.title || row.url)}</a>`;
+function excelStatusStyle(value) {
+  if (["mapped", "linked", "match", "website_price_found"].includes(value)) return 4;
+  if (["error", "unresolved", "different"].includes(value)) return 6;
+  return 5;
+}
+
+function columnName(index) {
+  let name = "";
+  while (index > 0) {
+    const remainder = (index - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    index = Math.floor((index - 1) / 26);
+  }
+  return name;
+}
+
+function contentTypesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`;
+}
+
+function rootRelsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>`;
+}
+
+function appPropsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>Praktis Brochure Linker</Application>
+</Properties>`;
+}
+
+function corePropsXml() {
+  const created = new Date().toISOString();
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>Brochure link report</dc:title>
+  <dc:creator>Praktis Brochure Linker</dc:creator>
+  <cp:lastModifiedBy>Praktis Brochure Linker</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">${created}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">${created}</dcterms:modified>
+</cp:coreProperties>`;
+}
+
+function workbookXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`;
+}
+
+function workbookRelsXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`;
+}
+
+function worksheetRelsXml(hyperlinks) {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  ${hyperlinks
+    .map(
+      (link, index) =>
+        `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${xmlAttr(link.target)}" TargetMode="External"/>`
+    )
+    .join("")}
+</Relationships>`;
+}
+
+function stylesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="7">
+    <font><sz val="11"/><color rgb="FF18232B"/><name val="Arial"/></font>
+    <font><b/><sz val="11"/><color rgb="FF44525D"/><name val="Arial"/></font>
+    <font><b/><sz val="11"/><color rgb="FF177A55"/><name val="Arial"/></font>
+    <font><b/><sz val="11"/><color rgb="FF995E00"/><name val="Arial"/></font>
+    <font><b/><sz val="11"/><color rgb="FFA73333"/><name val="Arial"/></font>
+    <font><u/><sz val="11"/><color rgb="FF245FE0"/><name val="Arial"/></font>
+    <font><sz val="11"/><color rgb="FF64727D"/><name val="Arial"/></font>
+  </fonts>
+  <fills count="6">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFF3F6F8"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFE7F3EE"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFF7EDDF"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFF6E7E7"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border><left style="thin"><color rgb="FFD8E1E7"/></left><right style="thin"><color rgb="FFD8E1E7"/></right><top style="thin"><color rgb="FFD8E1E7"/></top><bottom style="thin"><color rgb="FFD8E1E7"/></bottom><diagonal/></border>
+  </borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="9">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment vertical="top"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+    <xf numFmtId="2" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"><alignment vertical="top"/></xf>
+    <xf numFmtId="0" fontId="2" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment vertical="top"/></xf>
+    <xf numFmtId="0" fontId="3" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment vertical="top"/></xf>
+    <xf numFmtId="0" fontId="4" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment vertical="top"/></xf>
+    <xf numFmtId="0" fontId="6" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"><alignment vertical="top"/></xf>
+    <xf numFmtId="0" fontId="5" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"><alignment vertical="top" wrapText="1"/></xf>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+  <dxfs count="0"/>
+  <tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/>
+</styleSheet>`;
+}
+
+function zipStore(files) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+
+  for (const [name, content] of files) {
+    const nameBytes = encoder.encode(name);
+    const data = typeof content === "string" ? encoder.encode(content) : content;
+    const crc = crc32(data);
+    const localHeader = zipLocalHeader(nameBytes, data.length, crc);
+    localParts.push(localHeader, nameBytes, data);
+    centralParts.push(zipCentralHeader(nameBytes, data.length, crc, offset), nameBytes);
+    offset += localHeader.length + nameBytes.length + data.length;
+  }
+
+  const centralSize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const end = zipEndRecord(files.length, centralSize, offset);
+  return concatUint8([...localParts, ...centralParts, end]);
+}
+
+function zipLocalHeader(nameBytes, size, crc) {
+  const header = new Uint8Array(30);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x04034b50, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, 0x0800, true);
+  view.setUint16(8, 0, true);
+  view.setUint16(10, 0, true);
+  view.setUint16(12, 0, true);
+  view.setUint32(14, crc, true);
+  view.setUint32(18, size, true);
+  view.setUint32(22, size, true);
+  view.setUint16(26, nameBytes.length, true);
+  view.setUint16(28, 0, true);
+  return header;
+}
+
+function zipCentralHeader(nameBytes, size, crc, offset) {
+  const header = new Uint8Array(46);
+  const view = new DataView(header.buffer);
+  view.setUint32(0, 0x02014b50, true);
+  view.setUint16(4, 20, true);
+  view.setUint16(6, 20, true);
+  view.setUint16(8, 0x0800, true);
+  view.setUint16(10, 0, true);
+  view.setUint16(12, 0, true);
+  view.setUint16(14, 0, true);
+  view.setUint32(16, crc, true);
+  view.setUint32(20, size, true);
+  view.setUint32(24, size, true);
+  view.setUint16(28, nameBytes.length, true);
+  view.setUint16(30, 0, true);
+  view.setUint16(32, 0, true);
+  view.setUint16(34, 0, true);
+  view.setUint16(36, 0, true);
+  view.setUint32(38, 0, true);
+  view.setUint32(42, offset, true);
+  return header;
+}
+
+function zipEndRecord(count, centralSize, centralOffset) {
+  const end = new Uint8Array(22);
+  const view = new DataView(end.buffer);
+  view.setUint32(0, 0x06054b50, true);
+  view.setUint16(4, 0, true);
+  view.setUint16(6, 0, true);
+  view.setUint16(8, count, true);
+  view.setUint16(10, count, true);
+  view.setUint32(12, centralSize, true);
+  view.setUint32(16, centralOffset, true);
+  view.setUint16(20, 0, true);
+  return end;
+}
+
+function concatUint8(parts) {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+  return output;
+}
+
+function crc32(data) {
+  let crc = 0xffffffff;
+  for (const byte of data) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let index = 0; index < 256; index += 1) {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    table[index] = value >>> 0;
+  }
+  return table;
+})();
+
+function xmlText(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function xmlAttr(value) {
+  return xmlText(value).replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
 function base64ToBlob(base64, type) {
@@ -529,7 +800,7 @@ function downloadBlob(blob, filename) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
 function formatPrice(value) {
