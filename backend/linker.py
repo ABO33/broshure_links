@@ -58,6 +58,7 @@ HEADER_PRICE_BOX_PADDING = 6.5
 HEADER_PAGE_EDGE_TOLERANCE = 18.0
 HEADER_EDGE_TOUCH_TOLERANCE = 6.0
 HEADER_PRICE_GROUP_GAP = 68.0
+BGN_PER_EUR = 1.95583
 
 
 def process_brochure(
@@ -118,11 +119,11 @@ def process_brochure(
             {
                 "page": item["page"],
                 "sku": item["sku"],
-                "status": link.get("status", "unresolved"),
+                "status": item.get("status") or link.get("status", "unresolved"),
                 "box_type": item["box_type"],
                 "url": link.get("url", ""),
                 "title": link.get("title", ""),
-                "message": link.get("message", ""),
+                "message": item.get("message") or link.get("message", ""),
                 "brochure_price": item.get("brochure_price"),
                 "brochure_price_text": item.get("brochure_price_text", ""),
                 "website_price": link.get("website_price"),
@@ -462,20 +463,23 @@ def detect_variant_table_rows(
             ]
             or [page.width]
         )
-        euro_window = find_table_euro_window(page, word, right_limit)
-        if not euro_window:
+        price_window = find_table_price_window(page, word, right_limit)
+        if not price_window:
             continue
+        euro_window = price_window["euro_window"]
         price_candidates = [
             candidate
             for candidate in table_price_candidates(line, word.x1 + 8, right_limit)
             if euro_window[0] <= candidate[0] and candidate[1] <= euro_window[1]
         ]
+        all_price_candidates = table_price_candidates(line, word.x1 + 8, right_limit)
 
         if not price_candidates:
             continue
 
         price_candidates.sort(key=lambda item: item[0])
         chosen = price_candidates[0]
+        table_issue = table_price_issue(price_window, chosen, all_price_candidates)
         price_group_right = chosen[1]
         line_right = max(chosen[1], price_group_right)
         line_top = min(other.top for other in line)
@@ -496,6 +500,8 @@ def detect_variant_table_rows(
                 chosen[3],
                 chosen[2],
                 linkable=False,
+                status="table_header_error" if table_issue else "",
+                message=table_issue,
             )
         )
 
@@ -543,38 +549,96 @@ def table_price_candidates(line: list[Word], left: float, right: float) -> list[
     return clean
 
 
-def find_table_euro_window(page: PageText, sku_word: Word, right_limit: float) -> tuple[float, float] | None:
-    euro_headers = [
+def find_table_price_window(page: PageText, sku_word: Word, right_limit: float) -> dict | None:
+    header_seeds = [
         word
         for word in page.words
-        if is_euro_header(word.text)
+        if (is_euro_header(word.text) or is_leva_header(word.text))
         and word.x0 > sku_word.x1 + 4
         and word.x0 < right_limit
         and -4 <= sku_word.top - word.top <= 90
     ]
-    if not euro_headers:
+    if not header_seeds:
         return None
 
-    for euro in sorted(euro_headers, key=lambda item: (sku_word.top - item.top, item.x0 - sku_word.x1)):
-        if not has_table_sku_column_header(page, sku_word, euro):
+    seen_row_mids: list[float] = []
+    for seed in sorted(header_seeds, key=lambda item: (sku_word.top - item.top, item.x0 - sku_word.x1)):
+        if any(abs(seed.mid_y - seen_mid) <= 3 for seen_mid in seen_row_mids):
             continue
-        same_header = same_line_words(page, euro, 5)
-        leva_headers = [
-            word
-            for word in same_header
-            if is_leva_header(word.text)
-            and word.x0 > euro.x1
-            and word.x0 < right_limit + 4
-        ]
-        left = max(sku_word.x1 + 1, euro.x0 - 10)
-        right = (min(word.x0 for word in leva_headers) - 2) if leva_headers else euro.x1 + 42
+        seen_row_mids.append(seed.mid_y)
+        same_header = same_line_words(page, seed, 6)
+        if not has_table_sku_column_header(sku_word, same_header):
+            continue
+        price_headers = sorted(
+            [
+                word
+                for word in same_header
+                if (is_euro_header(word.text) or is_leva_header(word.text))
+                and word.x0 > sku_word.x1 + 4
+                and word.x0 < right_limit + 4
+            ],
+            key=lambda item: item.x0,
+        )
+        if not price_headers:
+            continue
+        first_header = price_headers[0]
+        second_header = price_headers[1] if len(price_headers) > 1 else None
+        left = max(sku_word.x1 + 1, first_header.x0 - 10)
+        right = (second_header.x0 - 2) if second_header else first_header.x1 + 42
         if right > left + 4:
-            return left, right
+            return {
+                "euro_window": (left, right),
+                "first_header": first_header.text,
+                "second_header": second_header.text if second_header else "",
+                "second_window": (
+                    second_header.x0 - 2,
+                    min(right_limit, second_header.x1 + 42),
+                )
+                if second_header
+                else None,
+            }
     return None
 
 
-def has_table_sku_column_header(page: PageText, sku_word: Word, euro_header: Word) -> bool:
-    for word in same_line_words(page, euro_header, 6):
+def table_price_issue(
+    price_window: dict,
+    euro_candidate: tuple[float, float, float, str],
+    all_price_candidates: list[tuple[float, float, float, str]],
+) -> str:
+    issues: list[str] = []
+    first_header = price_window.get("first_header", "")
+    second_header = price_window.get("second_header", "")
+    second_window = price_window.get("second_window")
+
+    if is_leva_header(first_header) or (second_header and not is_leva_header(second_header)):
+        issues.append("Table price headers are inconsistent; euro column should be first.")
+
+    leva_candidate = None
+    if second_window:
+        second_left, second_right = second_window
+        second_candidates = [
+            candidate
+            for candidate in all_price_candidates
+            if second_left <= candidate[0] and candidate[1] <= second_right
+        ]
+        if second_candidates:
+            leva_candidate = sorted(second_candidates, key=lambda item: item[0])[0]
+
+    if leva_candidate and not bgn_matches_euro(euro_candidate[2], leva_candidate[2]):
+        issues.append(
+            f"Table leva/euro conversion mismatch: {leva_candidate[2]:.2f} / {euro_candidate[2]:.2f} is not {BGN_PER_EUR:.5f}."
+        )
+
+    return " ".join(issues)
+
+
+def bgn_matches_euro(euro_price: float, leva_price: float) -> bool:
+    expected = round(float(euro_price) * BGN_PER_EUR, 2)
+    return abs(expected - float(leva_price)) <= 0.02
+
+
+def has_table_sku_column_header(sku_word: Word, header_line: list[Word]) -> bool:
+    for word in header_line:
         if word.x0 > sku_word.x0 + 10 or word.x1 < sku_word.x0 - 28:
             continue
         if is_euro_header(word.text) or is_leva_header(word.text):
@@ -587,12 +651,17 @@ def has_table_sku_column_header(page: PageText, sku_word: Word, euro_header: Wor
 
 def is_euro_header(text: str) -> bool:
     lowered = str(text or "").lower()
-    return "€" in lowered or "eur" in lowered
+    return "\u20ac" in lowered or "\u0432\u201a\u00ac" in lowered or "eur" in lowered
 
 
 def is_leva_header(text: str) -> bool:
     lowered = str(text or "").lower()
-    return lowered.startswith("лв") or lowered.startswith("lv") or lowered.startswith("bgn")
+    return (
+        lowered.startswith("\u043b\u0432")
+        or lowered.startswith("\u0440\u00bb\u0440\u0456")
+        or lowered.startswith("lv")
+        or lowered.startswith("bgn")
+    )
 
 
 def is_priceish_text(text: str) -> bool:
@@ -1059,8 +1128,8 @@ def mark_price_only_statuses(detections: list[dict], resolved: dict[str, dict]) 
     for item in detections:
         resolved[item["sku"]] = {
             "sku": item["sku"],
-            "status": "price_only",
-            "message": "Excel price check mode does not place links.",
+            "status": item.get("status") or "price_only",
+            "message": item.get("message") or "Excel price check mode does not place links.",
         }
 
 
@@ -1258,6 +1327,8 @@ def _detection(
     brochure_price_text: str = "",
     brochure_price: float | None = None,
     linkable: bool = True,
+    status: str = "",
+    message: str = "",
 ) -> dict:
     return {
         "page": page.page_number,
@@ -1268,6 +1339,8 @@ def _detection(
         "brochure_price_text": brochure_price_text,
         "brochure_price": brochure_price,
         "linkable": linkable,
+        "status": status,
+        "message": message,
     }
 
 

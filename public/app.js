@@ -44,6 +44,7 @@ const labels = {
   search_only: "Search only",
   link_not_found: "Link not found",
   price_only: "Price only",
+  table_header_error: "Table header error",
   blocked: "Blocked",
   unresolved: "Unresolved",
   error: "Error",
