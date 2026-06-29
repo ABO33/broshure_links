@@ -90,6 +90,18 @@
                   <input id="pageNumberInput" name="pageNumber" type="number" min="1" step="1" placeholder="Page number" disabled>
                 </span>
               </label>
+              <label class="toggle compact-toggle page-range-toggle">
+                <input name="pageMode" type="radio" value="range">
+                <span>
+                  <strong>Multiple pages</strong>
+                  <small>Processes a continuous page range.</small>
+                  <span class="page-range-inputs">
+                    <input id="pageStartInput" name="pageStart" type="number" min="1" step="1" placeholder="From" disabled>
+                    <span>to</span>
+                    <input id="pageEndInput" name="pageEnd" type="number" min="1" step="1" placeholder="To" disabled>
+                  </span>
+                </span>
+              </label>
             </fieldset>
 
             <label class="toggle">

@@ -6,6 +6,8 @@ const excelLabel = document.querySelector("#excelLabel");
 const modeInputs = [...document.querySelectorAll("input[name='mode']")];
 const pageModeInputs = [...document.querySelectorAll("input[name='pageMode']")];
 const pageNumberInput = document.querySelector("#pageNumberInput");
+const pageStartInput = document.querySelector("#pageStartInput");
+const pageEndInput = document.querySelector("#pageEndInput");
 const progress = document.querySelector("#progress");
 const processButton = document.querySelector("#processButton");
 const summaryGrid = document.querySelector("#summaryGrid");
@@ -45,6 +47,9 @@ const labels = {
   link_not_found: "Link not found",
   price_only: "Price only",
   table_header_error: "Table header error",
+  grouped_search: "Grouped search",
+  group_count_mismatch: "Group count mismatch",
+  group_count_unknown: "Group count unknown",
   blocked: "Blocked",
   unresolved: "Unresolved",
   error: "Error",
@@ -112,6 +117,20 @@ form.addEventListener("submit", async (event) => {
     resultHint.textContent = "Enter the page number you want to process.";
     pageNumberInput.focus();
     return;
+  }
+  if (getSelectedPageMode() === "range") {
+    const start = Number(pageStartInput.value);
+    const end = Number(pageEndInput.value);
+    if (!start || !end) {
+      resultHint.textContent = "Enter the first and last page you want to process.";
+      (pageStartInput.value ? pageEndInput : pageStartInput).focus();
+      return;
+    }
+    if (start > end) {
+      resultHint.textContent = "The first page in the range must be before or equal to the last page.";
+      pageStartInput.focus();
+      return;
+    }
   }
 
   setBusy(true);
@@ -260,8 +279,13 @@ function updateModeState() {
 
 function updatePageScopeState() {
   const singlePage = getSelectedPageMode() === "single";
+  const rangePages = getSelectedPageMode() === "range";
   pageNumberInput.disabled = !singlePage;
   pageNumberInput.required = singlePage;
+  pageStartInput.disabled = !rangePages;
+  pageEndInput.disabled = !rangePages;
+  pageStartInput.required = rangePages;
+  pageEndInput.required = rangePages;
 }
 
 function getSelectedMode() {
@@ -623,7 +647,7 @@ function numberCell(column, row, value, style) {
 }
 
 function excelStatusStyle(value) {
-  if (["mapped", "linked", "match", "website_price_found"].includes(value)) return 4;
+  if (["mapped", "linked", "match", "website_price_found", "grouped_search"].includes(value)) return 4;
   if (["error", "unresolved", "different"].includes(value)) return 6;
   return 5;
 }

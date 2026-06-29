@@ -4,16 +4,19 @@ from email.parser import BytesParser
 from email.policy import default
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 import mimetypes
 import os
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from .linker import process_brochure
+from .logging_config import configure_logging
 
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = ROOT / "public"
+logger = logging.getLogger(__name__)
 
 
 class AppHandler(BaseHTTPRequestHandler):
@@ -40,6 +43,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Upload a PDF brochure first."}, status=400)
                 return
 
+            logger.info(
+                "Process request started: pdf=%s size=%s mode=%s pageMode=%s",
+                pdf["filename"],
+                len(pdf["data"]),
+                fields.get("mode", ""),
+                fields.get("pageMode", "all"),
+            )
             result = process_brochure(
                 pdf_bytes=pdf["data"],
                 pdf_name=pdf["filename"],
@@ -55,13 +65,22 @@ class AppHandler(BaseHTTPRequestHandler):
                     "comparePrices": fields.get("comparePrices") == "on",
                     "pageMode": fields.get("pageMode", "all"),
                     "pageNumber": fields.get("pageNumber", ""),
+                    "pageStart": fields.get("pageStart", ""),
+                    "pageEnd": fields.get("pageEnd", ""),
                     "minDigits": fields.get("minDigits", "5"),
                     "maxDigits": fields.get("maxDigits", "12"),
                     "boxPadding": fields.get("boxPadding", "0"),
                 },
             )
+            logger.info(
+                "Process request finished: rows=%s links=%s pages=%s",
+                len(result.get("rows") or []),
+                result.get("summary", {}).get("linkedAnnotations"),
+                result.get("summary", {}).get("pages"),
+            )
             self.send_json(result)
         except Exception as exc:
+            logger.exception("Process request failed")
             self.send_json({"error": str(exc)}, status=500)
 
     def parse_multipart(self):
@@ -117,17 +136,18 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def log_message(self, format, *args):
-        print("%s - %s" % (self.address_string(), format % args))
+        logger.info("%s - %s", self.address_string(), format % args)
 
 
 def run(host: str | None = None, port: int | None = None):
+    configure_logging()
     host = host or os.environ.get("BROCHURE_HOST", "0.0.0.0")
     port = port or int(os.environ.get("BROCHURE_PORT", "5174"))
     server = ThreadingHTTPServer((host, port), AppHandler)
-    print(f"Praktis Brochure Linker listening on {host}:{port}")
+    logger.info("Praktis Brochure Linker listening on %s:%s", host, port)
     if host == "0.0.0.0":
-        print(f"Open on this computer: http://127.0.0.1:{port}")
-        print(f"Open from another computer: http://<this-computer-ip>:{port}")
+        logger.info("Open on this computer: http://127.0.0.1:%s", port)
+        logger.info("Open from another computer: http://<this-computer-ip>:%s", port)
     else:
-        print(f"Open: http://{host}:{port}")
+        logger.info("Open: http://%s:%s", host, port)
     server.serve_forever()

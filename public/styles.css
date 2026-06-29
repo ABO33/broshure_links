@@ -201,12 +201,14 @@ small {
   padding: 10px 12px;
 }
 
-.page-number-toggle small {
+.page-number-toggle small,
+.page-range-toggle small {
   display: block;
   margin-bottom: 8px;
 }
 
-.page-number-toggle input[type="number"] {
+.page-number-toggle input[type="number"],
+.page-range-toggle input[type="number"] {
   width: min(170px, 100%);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -214,7 +216,23 @@ small {
   background: #fff;
 }
 
-.page-number-toggle input[type="number"]:disabled {
+.page-range-inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  max-width: 260px;
+}
+
+.page-range-inputs span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.page-number-toggle input[type="number"]:disabled,
+.page-range-toggle input[type="number"]:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -638,7 +656,8 @@ tbody tr:last-child td {
 .badge.mapped,
 .badge.linked,
 .badge.match,
-.badge.website_price_found {
+.badge.website_price_found,
+.badge.grouped_search {
   color: var(--ok);
   background: rgba(23, 122, 85, 0.1);
 }
@@ -649,6 +668,8 @@ tbody tr:last-child td {
 .badge.link_not_found,
 .badge.price_only,
 .badge.table_header_error,
+.badge.group_count_mismatch,
+.badge.group_count_unknown,
 .badge.no_url,
 .badge.no_brochure_price,
 .badge.no_website_price,

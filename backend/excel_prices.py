@@ -30,11 +30,13 @@ def parse_excel_prices(data: bytes | None, filename: str = "") -> dict[str, dict
         }
         sku = normalize_sku(values.get("M"))
         price = parse_price(values.get("U"))
-        if not sku or price is None:
+        name = normalize_name(values.get("N"))
+        if not sku or (price is None and not name):
             continue
         prices[sku] = {
             "sku": sku,
             "excel_price": price,
+            "excel_name": name,
             "excel_row": row_number,
         }
 
@@ -92,6 +94,10 @@ def normalize_sku(value: object) -> str:
         text = text.split(".", 1)[0]
     match = SKU_RE.search(text.split(",", 1)[0].split("-", 1)[0])
     return match.group(0) if match else ""
+
+
+def normalize_name(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def parse_price(value: object) -> float | None:

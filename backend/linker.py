@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from io import BytesIO
+import logging
 import math
 import re
 from typing import Iterable
@@ -13,9 +14,11 @@ from pypdf.annotations import Link
 from reportlab.pdfgen import canvas
 
 from .excel_prices import parse_excel_prices
+from .grouped_search import make_group_search_url_from_titles
+from .logging_config import configure_logging
 from .mapping import parse_mapping
-from .praktis_playwright import compare_prices_with_playwright
-from .resolver import compare_website_price, resolve_skus, search_url_for_sku
+from .praktis_playwright import compare_prices_with_playwright, count_search_results_with_playwright
+from .resolver import compare_website_price, count_search_results, resolve_skus, search_url_for_sku
 
 
 @dataclass
@@ -59,6 +62,7 @@ HEADER_PAGE_EDGE_TOLERANCE = 18.0
 HEADER_EDGE_TOUCH_TOLERANCE = 6.0
 HEADER_PRICE_GROUP_GAP = 68.0
 BGN_PER_EUR = 1.95583
+logger = logging.getLogger(__name__)
 
 
 def process_brochure(
@@ -70,6 +74,7 @@ def process_brochure(
     excel_bytes: bytes | None = None,
     excel_name: str = "",
 ) -> dict:
+    configure_logging()
     options = options or {}
     min_digits = _int_option(options, "minDigits", 5, 5, 12)
     max_digits = _int_option(options, "maxDigits", 12, min_digits, 12)
@@ -84,8 +89,22 @@ def process_brochure(
     if excel_prices_enabled and not excel_bytes:
         raise ValueError("Upload an Excel .xlsx file for the selected price check mode.")
 
+    logger.info(
+        "Brochure processing started: file=%s mode=%s minDigits=%s maxDigits=%s padding=%s",
+        pdf_name,
+        mode,
+        min_digits,
+        max_digits,
+        box_padding,
+    )
     pages = extract_text_pages(pdf_bytes, min_digits, max_digits)
+    logger.info("Extracted readable text from %s PDF pages", len(pages))
     process_pages, page_scope = select_processing_pages(pages, options)
+    logger.info(
+        "Selected page scope: scope=%s pages=%s",
+        page_scope,
+        ",".join(str(page.page_number) for page in process_pages),
+    )
     detections = detect_boxes(
         process_pages,
         min_digits,
@@ -93,15 +112,28 @@ def process_brochure(
         box_padding,
         skip_last_page=page_scope == "all",
     )
+    logger.info("Detected %s SKU/link boxes", len(detections))
+    groups = attach_variant_parent_groups(detections)
+    logger.info("Detected %s complex SKU groups", len(groups))
     skus = sorted({item["sku"] for item in detections})
+    excel_prices = parse_excel_prices(excel_bytes, excel_name) if excel_bytes else {}
+    if excel_bytes:
+        logger.info("Loaded %s Excel price rows from %s", len(excel_prices), excel_name)
     mapping = parse_mapping(mapping_bytes, mapping_name)
+    if mapping_bytes:
+        logger.info("Loaded %s manual mapping rows from %s", len(mapping), mapping_name)
     resolved = resolve_skus(skus, mapping, live_lookup, fallback_search)
+    logger.info("Resolved initial links for %s unique SKUs", len(skus))
     if website_prices:
+        logger.info("Starting website price/link checks for %s detections", len(detections))
         attach_price_comparisons(detections, resolved)
+        logger.info("Finished website price/link checks")
     if excel_prices_enabled:
-        excel_prices = parse_excel_prices(excel_bytes, excel_name)
+        logger.info("Starting Excel price comparisons")
         attach_excel_comparisons(detections, excel_prices)
+        logger.info("Finished Excel price comparisons")
     if website_prices and excel_prices_enabled:
+        logger.info("Starting triple price comparisons")
         attach_triple_comparisons(detections)
     else:
         mark_triple_not_checked(detections)
@@ -110,7 +142,12 @@ def process_brochure(
     if fallback_search:
         ensure_search_fallbacks(resolved, skus)
     sanitize_resolved_links(resolved, skus)
+    if link_annotations:
+        logger.info("Applying grouped search links")
+        apply_grouped_search_links(groups, resolved, validate_counts=website_prices)
+        logger.info("Finished grouped search links")
     linked_pdf, linked_count = write_links(pdf_bytes, pages, detections, resolved, debug_boxes, link_annotations)
+    logger.info("Wrote %s PDF link annotations", linked_count)
 
     rows = []
     for item in detections:
@@ -152,6 +189,13 @@ def process_brochure(
     triple_different = sum(1 for row in rows if row.get("triple_status") == "different")
     variant_rows = sum(1 for row in rows if row.get("box_type") == "variant")
 
+    logger.info(
+        "Brochure processing finished: detections=%s uniqueSkus=%s linkedSkus=%s priceDiffs=%s",
+        len(detections),
+        len(skus),
+        len(linked_skus),
+        price_different,
+    )
     return {
         "outputFileName": output_name(pdf_name),
         "pdfBase64": _to_base64(linked_pdf),
@@ -190,18 +234,36 @@ def legacy_mode(options: dict) -> str:
 
 
 def select_processing_pages(pages: list[PageText], options: dict) -> tuple[list[PageText], str]:
-    if str(options.get("pageMode") or "all") != "single":
+    page_mode = str(options.get("pageMode") or "all").strip().lower()
+    if page_mode == "all":
         return pages, "all"
 
-    try:
-        page_number = int(str(options.get("pageNumber") or "").strip())
-    except ValueError:
-        raise ValueError("Enter a valid page number to process.")
+    if page_mode == "single":
+        try:
+            page_number = int(str(options.get("pageNumber") or "").strip())
+        except ValueError:
+            raise ValueError("Enter a valid page number to process.")
 
-    if page_number < 1 or page_number > len(pages):
-        raise ValueError(f"Page number must be between 1 and {len(pages)}.")
+        if page_number < 1 or page_number > len(pages):
+            raise ValueError(f"Page number must be between 1 and {len(pages)}.")
 
-    return [pages[page_number - 1]], "single"
+        return [pages[page_number - 1]], "single"
+
+    if page_mode == "range":
+        try:
+            start = int(str(options.get("pageStart") or "").strip())
+            end = int(str(options.get("pageEnd") or "").strip())
+        except ValueError:
+            raise ValueError("Enter valid start and end page numbers to process.")
+
+        if start < 1 or end < 1 or start > len(pages) or end > len(pages):
+            raise ValueError(f"Page range must be between 1 and {len(pages)}.")
+        if start > end:
+            raise ValueError("The first page in the range must be before or equal to the last page.")
+
+        return pages[start - 1 : end], "range"
+
+    raise ValueError("Choose whether to process the whole file, one page, or a page range.")
 
 
 def extract_text_pages(pdf_bytes: bytes, min_digits: int = 5, max_digits: int = 12) -> list[PageText]:
@@ -361,6 +423,72 @@ def detect_boxes(
         detections.extend(item_detections)
         detections.extend(detect_variant_table_rows(page, item_detections, min_digits, max_digits))
     return detections
+
+
+def attach_variant_parent_groups(detections: list[dict]) -> list[dict]:
+    items = [item for item in detections if item.get("box_type") == "item"]
+    variants = [item for item in detections if item.get("box_type") == "variant"]
+    groups_by_parent: dict[int, dict] = {}
+
+    for variant in variants:
+        parent = find_parent_item_for_variant(variant, items)
+        if not parent:
+            continue
+        variant["parent_sku"] = parent["sku"]
+        key = id(parent)
+        group = groups_by_parent.setdefault(key, {"parent": parent, "variants": []})
+        group["variants"].append(variant)
+
+    groups: list[dict] = []
+    for group in groups_by_parent.values():
+        parent = group["parent"]
+        variants_sorted = sorted(group["variants"], key=lambda item: (item["box"]["y"], item["box"]["x"], item["sku"]))
+        skus = [parent["sku"]]
+        for variant in variants_sorted:
+            if variant["sku"] not in skus:
+                skus.append(variant["sku"])
+        if len(skus) < 2:
+            continue
+        parent["group_skus"] = skus
+        parent["box_type"] = "complex"
+        groups.append({"parent": parent, "variants": variants_sorted, "skus": skus})
+    return groups
+
+
+def find_parent_item_for_variant(variant: dict, items: list[dict]) -> dict | None:
+    variant_box = variant["box"]
+    center_x = variant_box["x"] + variant_box["width"] / 2
+    center_y = variant_box["y"] + variant_box["height"] / 2
+    candidates: list[tuple[float, dict]] = []
+
+    for item in items:
+        if item["page"] != variant["page"]:
+            continue
+        box = item["box"]
+        if not (
+            box["x"] - 3 <= center_x <= box["x"] + box["width"] + 3
+            and box["y"] - 3 <= center_y <= box["y"] + box["height"] + 3
+        ):
+            continue
+        area = box["width"] * box["height"]
+        candidates.append((area, item))
+
+    if candidates:
+        return sorted(candidates, key=lambda pair: pair[0])[0][1]
+
+    fallback: list[tuple[float, dict]] = []
+    for item in items:
+        if item["page"] != variant["page"]:
+            continue
+        box = item["box"]
+        overlap_x = min(box["x"] + box["width"], variant_box["x"] + variant_box["width"]) - max(box["x"], variant_box["x"])
+        if overlap_x <= 8:
+            continue
+        if variant_box["y"] < box["y"] - 3 or variant_box["y"] > box["y"] + box["height"] + 12:
+            continue
+        fallback.append((abs((box["y"] + box["height"]) - variant_box["y"]), item))
+
+    return sorted(fallback, key=lambda pair: pair[0])[0][1] if fallback else None
 
 
 def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padding: float) -> list[dict]:
@@ -714,6 +842,7 @@ def detect_header_driven_boxes(
             word
             for word in sorted(row, key=lambda item: item.x0)
             if not is_multiline_header_continuation(word, candidates)
+            and not is_sku_range_continuation(page, word, row)
         ]
         row_headers = []
         for index, word in enumerate(row_words):
@@ -722,6 +851,10 @@ def detect_header_driven_boxes(
                 if index + 1 < len(row_words)
                 else page.width
             )
+            if is_variant_table_sku_word(page, word, min_digits, max_digits) and not find_direct_header_price_word(
+                page, word, right_edge
+            ):
+                continue
             price_word = find_header_price_word(page, word, right_edge)
             if not price_word:
                 continue
@@ -783,15 +916,68 @@ def cluster_words_by_top(words: list[Word], tolerance: float) -> list[list[Word]
 
 
 def find_header_price_word(page: PageText, sku_word: Word, right_edge: float) -> Word | None:
-    prices = []
-    for word in page.words:
-        if not is_header_price_word(word, sku_word, right_edge):
-            continue
-        prices.append(word)
+    prices = find_direct_header_price_words(page, sku_word, right_edge)
     prices.extend(find_split_header_price_words(page, sku_word, right_edge))
     if not prices:
         return None
     return sorted(prices, key=lambda item: (item.x0, item.top))[0]
+
+
+def find_direct_header_price_word(page: PageText, sku_word: Word, right_edge: float) -> Word | None:
+    prices = find_direct_header_price_words(page, sku_word, right_edge)
+    return sorted(prices, key=lambda item: (item.x0, item.top))[0] if prices else None
+
+
+def find_direct_header_price_words(page: PageText, sku_word: Word, right_edge: float) -> list[Word]:
+    return [word for word in page.words if is_header_price_word(word, sku_word, right_edge)]
+
+
+def is_variant_table_sku_word(page: PageText, word: Word, min_digits: int, max_digits: int) -> bool:
+    if word.fragment and not word.comma_primary:
+        return False
+    if not is_sku(word.text, min_digits, max_digits):
+        return False
+    if word.height > 8.8 or word.top <= 24:
+        return False
+    if is_after_comma_continuation(page, word, min_digits, max_digits):
+        return False
+
+    line = same_line_words(page, word, max(3.0, word.height * 0.9))
+    right_limit = min(
+        [
+            other.x0
+            for other in line
+            if other is not word
+            and other.x0 > word.x1 + 8
+            and is_sku(other.text, min_digits, max_digits)
+        ]
+        or [page.width]
+    )
+    return find_table_price_window(page, word, right_limit) is not None
+
+
+def is_sku_range_continuation(page: PageText, word: Word, row: list[Word]) -> bool:
+    if not word.text.isdigit():
+        return False
+    previous_skus = [
+        other
+        for other in row
+        if other is not word
+        and other.text.isdigit()
+        and other.x1 < word.x0
+        and abs(other.mid_y - word.mid_y) <= 4
+    ]
+    if not previous_skus:
+        return False
+    previous = sorted(previous_skus, key=lambda item: item.x1)[-1]
+    between = [
+        other
+        for other in page.words
+        if other is not word
+        and previous.x1 - 1 <= other.x0 <= word.x0 + 1
+        and abs(other.mid_y - word.mid_y) <= 4
+    ]
+    return any(other.text.strip() in {"-", "\u2013", "\u2014"} for other in between)
 
 
 def is_header_price_word(word: Word, sku_word: Word, right_edge: float) -> bool:
@@ -1066,7 +1252,7 @@ def attach_excel_comparisons(detections: list[dict], excel_prices: dict[str, dic
     for item in detections:
         sku = item["sku"]
         excel_item = excel_prices.get(sku)
-        if excel_item:
+        if excel_item and excel_item.get("excel_price") is not None:
             item["excel_price"] = excel_item["excel_price"]
             item["excel_row"] = excel_item.get("excel_row")
         else:
@@ -1131,6 +1317,150 @@ def mark_price_only_statuses(detections: list[dict], resolved: dict[str, dict]) 
             "status": item.get("status") or "price_only",
             "message": item.get("message") or "Excel price check mode does not place links.",
         }
+
+
+def apply_grouped_search_links(
+    groups: list[dict],
+    resolved: dict[str, dict],
+    validate_counts: bool,
+) -> None:
+    prepared: list[dict] = []
+    logger.info("Preparing grouped search links: groups=%s validate=%s", len(groups), validate_counts)
+    for group in groups:
+        skus = group["skus"]
+        parent = group["parent"]
+        titles = group_website_titles(skus, resolved)
+        if len(titles) < 2:
+            logger.info(
+                "Skipping grouped search link without enough website titles: parent=%s skus=%s titles=%s",
+                parent["sku"],
+                ",".join(skus),
+                len(titles),
+            )
+            continue
+
+        try:
+            url, query = make_group_search_url_from_titles(titles)
+        except ValueError:
+            logger.warning(
+                "Could not build grouped search query: parent=%s skus=%s",
+                parent["sku"],
+                ",".join(skus),
+            )
+            continue
+
+        logger.info("Prepared grouped search link: parent=%s skus=%s query=%s", parent["sku"], ",".join(skus), query)
+        prepared.append({"group": group, "skus": skus, "parent": parent, "url": url, "query": query})
+
+    count_results: dict[str, dict] = {}
+    if validate_counts and prepared:
+        validation_requests = {item["url"]: item["skus"] for item in prepared}
+        logger.info("Validating grouped search links with browser: links=%s", len(validation_requests))
+        count_results = count_search_results_with_playwright(validation_requests)
+        urls = list(validation_requests)
+        for url in urls:
+            result = count_results.get(url, {})
+            if result.get("count_status") in {"ok", "blocked"}:
+                continue
+            logger.warning("Browser grouped validation did not finish cleanly; trying HTTP fallback: status=%s url=%s", result.get("count_status"), url)
+            fallback_result = count_search_results(url)
+            if fallback_result.get("count_status") == "ok":
+                count_results[url] = fallback_result
+            elif not result:
+                count_results[url] = fallback_result
+
+    for item in prepared:
+        skus = item["skus"]
+        parent = item["parent"]
+        url = item["url"]
+        query = item["query"]
+        status = "grouped_search"
+        message = f"Grouped Praktis search for {len(skus)} SKUs: {', '.join(skus)}."
+        found_count = None
+        found_skus: list[str] = []
+        missing_skus: list[str] = []
+        extra_skus: list[str] = []
+        if validate_counts:
+            count_result = count_results.get(url, {})
+            count_status = count_result.get("count_status")
+            if count_status == "ok":
+                url = count_result.get("validated_url") or url
+                found_count = count_result.get("found_count")
+                found_skus = list(count_result.get("found_skus") or [])
+                missing_skus = list(count_result.get("missing_skus") or [])
+                extra_skus = list(count_result.get("extra_skus") or [])
+                count_mismatch = bool(count_result.get("count_mismatch")) or (
+                    found_count is not None and int(found_count) != len(skus)
+                )
+                if count_mismatch:
+                    status = "group_count_mismatch"
+                    message = (
+                        count_result.get("count_message")
+                        or "Grouped Praktis search result count does not match the brochure group; SKU checks were skipped."
+                    )
+                    logger.warning(
+                        "Grouped search count mismatch: parent=%s expected=%s found=%s",
+                        parent["sku"],
+                        len(skus),
+                        found_count,
+                    )
+                elif not found_skus:
+                    status = "group_count_unknown"
+                    message = "Grouped Praktis search loaded, but product SKUs could not be verified."
+                elif not missing_skus and not extra_skus and not count_mismatch:
+                    message = f"Grouped Praktis search validated all {len(skus)} brochure SKUs."
+                    logger.info("Grouped search validated: parent=%s skus=%s", parent["sku"], ",".join(skus))
+                else:
+                    status = "group_count_mismatch"
+                    details = []
+                    if missing_skus:
+                        details.append(f"missing: {', '.join(missing_skus)}")
+                    if extra_skus:
+                        details.append(f"extra: {', '.join(extra_skus)}")
+                    message = "Grouped Praktis search SKU mismatch; " + "; ".join(details) + "."
+                    logger.warning(
+                        "Grouped search SKU mismatch: parent=%s missing=%s extra=%s",
+                        parent["sku"],
+                        ",".join(missing_skus),
+                        ",".join(extra_skus),
+                    )
+            else:
+                status = "group_count_unknown"
+                message = count_result.get("count_message") or "Grouped Praktis search count could not be checked."
+                logger.warning(
+                    "Grouped search count unknown: parent=%s status=%s message=%s",
+                    parent["sku"],
+                    count_status,
+                    message,
+                )
+
+        existing = resolved.get(parent["sku"], {})
+        resolved[parent["sku"]] = {
+            **existing,
+            "sku": parent["sku"],
+            "status": status,
+            "source": "grouped-search",
+            "url": url,
+            "title": f"Grouped Praktis search: {query}",
+            "message": message,
+            "group_query": query,
+            "group_skus": skus,
+            "group_expected_count": len(skus),
+            "group_found_count": found_count,
+            "group_found_skus": found_skus,
+            "group_missing_skus": missing_skus,
+            "group_extra_skus": extra_skus,
+        }
+
+
+def group_website_titles(skus: list[str], resolved: dict[str, dict]) -> list[str]:
+    titles: list[str] = []
+    for sku in skus:
+        link = resolved.get(sku, {})
+        title = str(link.get("title") or "").strip()
+        if link.get("status") == "linked" and title and not title.lower().startswith("praktis search for "):
+            titles.append(title)
+    return titles
 
 
 def apply_price_check_result(link: dict, result: dict) -> None:
@@ -1269,6 +1599,8 @@ def build_debug_overlay(pages: list[PageText], detections: list[dict]) -> bytes:
         c.setStrokeColorRGB(0.05, 0.25, 1.0)
         c.setLineWidth(0.6)
         for item in by_page.get(page.page_number, []):
+            if not item.get("linkable", True):
+                continue
             box = item["box"]
             c.rect(box["x"], page.height - box["y"] - box["height"], box["width"], box["height"], stroke=1, fill=0)
         c.showPage()

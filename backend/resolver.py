@@ -90,7 +90,7 @@ def fetch_html(url: str) -> tuple[str, str, int]:
         return raw.decode(charset, errors="replace"), exc.geturl(), exc.code
 
 
-def extract_product_candidates(html: str, source_url: str) -> list[str]:
+def extract_product_candidates(html: str, source_url: str, limit: int | None = 8) -> list[str]:
     parser = LinkExtractor()
     parser.feed(html)
     urls: list[str] = []
@@ -109,7 +109,20 @@ def extract_product_candidates(html: str, source_url: str) -> list[str]:
             seen.add(normalized)
             urls.append(normalized)
 
-    return urls[:8]
+    return urls[:limit] if limit is not None else urls
+
+
+def count_search_results(url: str) -> dict:
+    try:
+        html, final_url, status = fetch_html(url)
+    except Exception as exc:
+        return {"count_status": "error", "count_message": str(exc)}
+
+    if is_blocked_page(html, status):
+        return {"count_status": "blocked", "count_message": "Praktis blocked grouped search validation."}
+
+    candidates = extract_product_candidates(html, final_url, limit=None)
+    return {"count_status": "ok", "found_count": len(candidates)}
 
 
 def resolve_skus(skus: list[str], mapping: dict[str, dict], live_lookup: bool, fallback_search: bool) -> dict[str, dict]:
