@@ -491,6 +491,68 @@ def find_parent_item_for_variant(variant: dict, items: list[dict]) -> dict | Non
     return sorted(fallback, key=lambda pair: pair[0])[0][1] if fallback else None
 
 
+def variant_sku_candidate_words(
+    words: list[Word],
+    item_skus: set[str],
+    min_digits: int,
+    max_digits: int,
+) -> list[Word]:
+    virtual_by_original: dict[int, Word] = {}
+    for word in words:
+        virtual = merged_variant_sku_prefix(word, words, min_digits, max_digits)
+        if virtual and virtual.text not in item_skus:
+            virtual_by_original[id(word)] = virtual
+
+    candidates: list[Word] = list(virtual_by_original.values())
+    candidates.extend(word for word in words if id(word) not in virtual_by_original)
+    return sorted(candidates, key=lambda item: (item.top, item.x0, item.text))
+
+
+def merged_variant_sku_prefix(
+    word: Word,
+    words: list[Word],
+    min_digits: int,
+    max_digits: int,
+) -> Word | None:
+    if not word.text.isdigit() or len(word.text) <= min_digits or word.height > 8.8:
+        return None
+
+    fragments = [
+        other
+        for other in words
+        if other is not word
+        and other.text.isdigit()
+        and len(other.text) < len(word.text)
+        and abs(other.mid_y - word.mid_y) <= 1.8
+        and other.x0 >= word.x0 - 0.5
+        and other.x1 <= word.x1 + 0.5
+    ]
+    if len(fragments) < 2:
+        return None
+
+    text = ""
+    picked: list[Word] = []
+    for fragment in sorted(fragments, key=lambda item: (item.x0, item.x1)):
+        trial = text + fragment.text
+        if not word.text.startswith(trial):
+            continue
+        text = trial
+        picked.append(fragment)
+        suffix_len = len(word.text) - len(text)
+        if min_digits <= len(text) <= max_digits and 1 <= suffix_len <= 3:
+            return Word(
+                text=text,
+                x0=picked[0].x0,
+                x1=fragment.x1,
+                top=min(item.top for item in picked),
+                bottom=max(item.bottom for item in picked),
+                comma_primary=True,
+                original_text=word.text,
+            )
+
+    return None
+
+
 def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padding: float) -> list[dict]:
     candidates = [
         word
@@ -566,7 +628,7 @@ def detect_variant_table_rows(
     item_skus = {item["sku"] for item in item_detections}
     variants: list[dict] = []
 
-    for word in page.words:
+    for word in variant_sku_candidate_words(page.words, item_skus, min_digits, max_digits):
         if word.fragment and not word.comma_primary:
             continue
         if not is_sku(word.text, min_digits, max_digits):
@@ -581,6 +643,8 @@ def detect_variant_table_rows(
             continue
 
         line = same_line_words(page, word, max(3.0, word.height * 0.9))
+        if is_overlapped_price_noise(word, line) and not has_nearby_code_column_header(page, word):
+            continue
         right_limit = min(
             [
                 other.x0
@@ -588,6 +652,7 @@ def detect_variant_table_rows(
                 if other is not word
                 and other.x0 > word.x1 + 8
                 and is_sku(other.text, min_digits, max_digits)
+                and not (is_overlapped_price_noise(other, line) and not has_nearby_code_column_header(page, other))
             ]
             or [page.width]
         )
@@ -638,7 +703,7 @@ def detect_variant_table_rows(
 
 def table_price_candidates(line: list[Word], left: float, right: float) -> list[tuple[float, float, float, str]]:
     candidates: list[tuple[float, float, float, str]] = []
-    tokens = [word for word in line if word.x0 > left and word.x0 < right]
+    tokens = normalized_table_price_tokens([word for word in line if word.x0 > left and word.x0 < right])
 
     for word in tokens:
         price = parse_table_price_word(word.text)
@@ -675,6 +740,66 @@ def table_price_candidates(line: list[Word], left: float, right: float) -> list[
         seen.add(key)
         clean.append((x0, x1, price, text))
     return clean
+
+
+def normalized_table_price_tokens(tokens: list[Word]) -> list[Word]:
+    out: list[Word] = []
+    for word in tokens:
+        if is_overlapped_price_noise(word, tokens):
+            continue
+        out.extend(split_price_token(word))
+    return sorted(out, key=lambda item: (item.x0, item.x1, item.text))
+
+
+def is_overlapped_price_noise(word: Word, tokens: list[Word]) -> bool:
+    if not word.text.isdigit() or len(word.text) < 5:
+        return False
+    pieces = [
+        other
+        for other in tokens
+        if other is not word
+        and len(other.text) < len(word.text)
+        and abs(other.mid_y - word.mid_y) <= 1.5
+        and other.x0 >= word.x0 - 0.2
+        and other.x1 <= word.x1 + 0.2
+        and re.fullmatch(r"\d+[.,]?|[.,]\d+|[.,]", other.text)
+    ]
+    return len(pieces) >= 2
+
+
+def split_price_token(word: Word) -> list[Word]:
+    text = word.text
+    if re.fullmatch(r"\d+[.,]", text):
+        return split_word_at_chars(word, len(text) - 1)
+    if re.fullmatch(r"[.,]\d+", text):
+        return split_word_at_chars(word, 1)
+    return [word]
+
+
+def split_word_at_chars(word: Word, split_at: int) -> list[Word]:
+    text = word.text
+    if split_at <= 0 or split_at >= len(text):
+        return [word]
+    split_x = word.x0 + word.width * (split_at / max(1, len(text)))
+    first = Word(
+        text=text[:split_at],
+        x0=word.x0,
+        x1=split_x,
+        top=word.top,
+        bottom=word.bottom,
+        fragment=True,
+        original_text=word.original_text or word.text,
+    )
+    second = Word(
+        text=text[split_at:],
+        x0=split_x,
+        x1=word.x1,
+        top=word.top,
+        bottom=word.bottom,
+        fragment=True,
+        original_text=word.original_text or word.text,
+    )
+    return [first, second]
 
 
 def find_table_price_window(page: PageText, sku_word: Word, right_limit: float) -> dict | None:
@@ -774,6 +899,25 @@ def has_table_sku_column_header(sku_word: Word, header_line: list[Word]) -> bool
         if is_priceish_text(word.text) or SKU_RE.search(word.text):
             continue
         return True
+    return False
+
+
+def has_nearby_code_column_header(page: PageText, sku_word: Word) -> bool:
+    nearby = [
+        word
+        for word in page.words
+        if 4 <= sku_word.top - word.top <= 45
+        and word.x0 >= sku_word.x0 - 12
+        and word.x0 <= sku_word.x0 + 40
+        and not is_priceish_text(word.text)
+        and not is_euro_header(word.text)
+        and not is_leva_header(word.text)
+    ]
+    for line in cluster_words_by_top(nearby, tolerance=3):
+        text = "".join(word.text for word in sorted(line, key=lambda item: item.x0)).lower()
+        text = re.sub(r"[^a-zа-я]+", "", text)
+        if "код" in text or "kog" in text or "kod" in text:
+            return True
     return False
 
 
