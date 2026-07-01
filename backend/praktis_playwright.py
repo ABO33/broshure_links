@@ -492,7 +492,8 @@ async def _validate_grouped_search_page(context, page, url: str, expected_skus: 
 
 
 async def _find_verified_product_on_search_page(context, page, sku: str) -> dict | None:
-    for card in await _search_result_cards(page):
+    cards = await _search_result_cards(page)
+    for card in cards:
         text = str(card.get("text") or "")
         data_name = str(card.get("dataName") or "")
         url = _abs(str(card.get("href") or ""))
@@ -511,11 +512,55 @@ async def _find_verified_product_on_search_page(context, page, sku: str) -> dict
         if detail:
             return detail
 
-    for url in (await _product_result_urls(page))[:24]:
+    product_urls = (await _product_result_urls(page))[:24]
+    for url in product_urls:
         detail = await _load_product_detail(context, url, sku=sku)
         if detail:
             return detail
+    single_result = single_product_search_result(cards, product_urls)
+    if single_result:
+        detail = await _load_product_detail(context, single_result["url"], sku=None)
+        if detail:
+            logger.info("Using single Praktis search result as SKU match: sku=%s url=%s", sku, detail.get("url"))
+            return {
+                **detail,
+                "source": "single_search_result",
+            }
+        logger.info("Using single Praktis search card as SKU match: sku=%s url=%s", sku, single_result["url"])
+        return single_result
     return None
+
+
+def single_product_search_result(cards: list[dict], product_urls: list[str]) -> dict | None:
+    urls = []
+    seen: set[str] = set()
+    for url in product_urls:
+        normalized = url.split("#", 1)[0]
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(normalized)
+    if len(urls) != 1:
+        return None
+
+    url = urls[0]
+    for card in cards:
+        card_url = _abs(str(card.get("href") or "")).split("#", 1)[0]
+        if card_url != url:
+            continue
+        title = _clean_product_title(str(card.get("title") or "")) or _extract_card_title(str(card.get("text") or ""))
+        return {
+            "url": url,
+            "title": title or _title_from_product_url(url),
+            "price": card.get("price"),
+            "source": "single_search_result",
+        }
+    return {
+        "url": url,
+        "title": _title_from_product_url(url),
+        "price": None,
+        "source": "single_search_result",
+    }
 
 
 async def _load_product_detail(context, url: str, sku: str | None) -> dict | None:

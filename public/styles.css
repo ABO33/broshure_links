@@ -370,7 +370,7 @@ small {
 
 table {
   width: 100%;
-  min-width: 1370px;
+  min-width: 1460px;
   border-collapse: collapse;
   font-size: 13px;
   table-layout: fixed;
@@ -382,6 +382,10 @@ table {
 
 .col-sku {
   width: 116px;
+}
+
+.col-parent-sku {
+  width: 112px;
 }
 
 .col-status {
@@ -667,11 +671,15 @@ tbody tr:last-child td {
 .badge.search_only,
 .badge.link_not_found,
 .badge.price_only,
+.badge.repeating_item,
 .badge.table_header_error,
+.badge.sku_illustration_error,
+.badge.group_title_missing,
 .badge.group_count_mismatch,
 .badge.group_count_unknown,
 .badge.no_url,
 .badge.no_brochure_price,
+.badge.brochure_price_not_defined,
 .badge.no_website_price,
 .badge.no_excel_price,
 .badge.not_found {

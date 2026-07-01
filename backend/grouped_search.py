@@ -108,9 +108,14 @@ COMMON_QUERY_STOP_WORDS = {
     "of",
     "the",
     "with",
+    "praktis",
+    "result",
+    "product",
+    "sku",
 }
 
 NUMBER_RE = re.compile(r"^[\u00f8\u0444]?\d+(?:[.,]\d+)?(?:[x\u0445/]\d+(?:[.,]\d+)?)*$")
+LETTER_RE = re.compile(r"[a-z\u0430-\u044f]", re.I)
 DIMENSION_RE = re.compile(
     r"^[\u00f8\u0444]?\d+(?:[.,]\d+)?(?:[x\u0445/]\d+(?:[.,]\d+)?)*\s*"
     r"(?:\u043c\u043c|mm|\u0441\u043c|cm|\u043c|m|\u043b|l|w|kw|\u043a\u0432\u0442|v|hz|"
@@ -132,7 +137,10 @@ def common_ordered_words(titles: list[str]) -> str:
     token_lists = remove_variant_tokens(token_lists)
     if not token_lists:
         return ""
-    return common_meaningful_words(token_lists)
+    query = common_meaningful_words(token_lists)
+    if query:
+        return query
+    return frequent_meaningful_words(token_lists)
 
 
 def common_meaningful_words(token_lists: list[list[str]]) -> str:
@@ -143,10 +151,59 @@ def common_meaningful_words(token_lists: list[list[str]]) -> str:
         norm = normalize_token(token)
         if not norm or norm not in common_tokens:
             continue
-        if norm in COMMON_QUERY_STOP_WORDS or is_dimension_token(norm) or norm in COLOR_WORDS:
+        if not is_meaningful_query_token(norm):
             continue
         result.append(token)
     return cleanup_query(" ".join(result[:8]))
+
+
+def frequent_meaningful_words(token_lists: list[list[str]]) -> str:
+    normalized_lists = [[normalize_token(token) for token in tokens if normalize_token(token)] for tokens in token_lists]
+    if not normalized_lists:
+        return ""
+    counts: dict[str, int] = {}
+    first_seen: dict[str, str] = {}
+    for tokens in token_lists:
+        seen_in_title: set[str] = set()
+        for token in tokens:
+            norm = normalize_token(token)
+            if not norm or not is_meaningful_query_token(norm):
+                continue
+            first_seen.setdefault(norm, token)
+            seen_in_title.add(norm)
+        for norm in seen_in_title:
+            counts[norm] = counts.get(norm, 0) + 1
+
+    minimum = max(2, math_ceil(len(token_lists) * 0.6))
+    first_title = token_lists[0]
+    result: list[str] = []
+    used: set[str] = set()
+    for token in first_title:
+        norm = normalize_token(token)
+        if norm in used or counts.get(norm, 0) < minimum:
+            continue
+        result.append(token)
+        used.add(norm)
+
+    if not result:
+        ranked = sorted(counts, key=lambda norm: (-counts[norm], list(first_seen).index(norm)))
+        result = [first_seen[norm] for norm in ranked[:4] if counts[norm] >= 2]
+
+    return cleanup_query(" ".join(result[:8]))
+
+
+def is_meaningful_query_token(norm: str) -> bool:
+    return (
+        bool(norm)
+        and bool(LETTER_RE.search(norm))
+        and norm not in COMMON_QUERY_STOP_WORDS
+        and norm not in COLOR_WORDS
+        and not is_dimension_token(norm)
+    )
+
+
+def math_ceil(value: float) -> int:
+    return int(-(-value // 1))
 
 
 def remove_variant_tokens(token_lists: list[list[str]]) -> list[list[str]]:

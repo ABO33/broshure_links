@@ -54,14 +54,23 @@ class PageText:
     footer_top: float | None = None
 
 
+@dataclass
+class SkuExpansion:
+    skus: list[str]
+    repeated_skus: list[str]
+
+
 SKU_RE = re.compile(r"\d{5,12}")
 SPLIT_SKU_TOKEN_RE = re.compile(r"^[\d,-]+$")
+ASCII_DIGITS_RE = re.compile(r"^[0-9]+$")
 HEADER_SKU_TEXT_INSET = 4.0
 HEADER_PRICE_BOX_PADDING = 6.5
 HEADER_PAGE_EDGE_TOLERANCE = 18.0
 HEADER_EDGE_TOUCH_TOLERANCE = 6.0
 HEADER_PRICE_GROUP_GAP = 68.0
 BGN_PER_EUR = 1.95583
+MAX_SHORTHAND_RANGE_ITEMS = 60
+UNDEFINED_BROCHURE_PRICE_TEXT = "Not defined"
 logger = logging.getLogger(__name__)
 
 
@@ -115,6 +124,7 @@ def process_brochure(
     logger.info("Detected %s SKU/link boxes", len(detections))
     groups = attach_variant_parent_groups(detections)
     logger.info("Detected %s complex SKU groups", len(groups))
+    flag_repeated_page_skus(detections)
     skus = sorted({item["sku"] for item in detections})
     excel_prices = parse_excel_prices(excel_bytes, excel_name) if excel_bytes else {}
     if excel_bytes:
@@ -146,6 +156,7 @@ def process_brochure(
         logger.info("Applying grouped search links")
         apply_grouped_search_links(groups, resolved, validate_counts=website_prices)
         logger.info("Finished grouped search links")
+    update_from_price_display(detections)
     linked_pdf, linked_count = write_links(pdf_bytes, pages, detections, resolved, debug_boxes, link_annotations)
     logger.info("Wrote %s PDF link annotations", linked_count)
 
@@ -156,6 +167,7 @@ def process_brochure(
             {
                 "page": item["page"],
                 "sku": item["sku"],
+                "parent_sku": item.get("parent_sku", ""),
                 "status": item.get("status") or link.get("status", "unresolved"),
                 "box_type": item["box_type"],
                 "url": link.get("url", ""),
@@ -163,6 +175,7 @@ def process_brochure(
                 "message": item.get("message") or link.get("message", ""),
                 "brochure_price": item.get("brochure_price"),
                 "brochure_price_text": item.get("brochure_price_text", ""),
+                "brochure_price_not_defined": bool(item.get("brochure_price_not_defined")),
                 "website_price": link.get("website_price"),
                 "price_status": item.get("price_status") or link.get("price_status", ""),
                 "price_message": item.get("price_message") or link.get("price_message", ""),
@@ -319,11 +332,11 @@ def stitch_split_sku_words(words: list[Word], min_digits: int, max_digits: int) 
 def build_stitched_sku(sequence: list[Word], min_digits: int, max_digits: int) -> list[Word]:
     if len(sequence) < 2:
         return []
-    if sequence[0].text.isdigit() and min_digits <= len(sequence[0].text) <= max_digits:
+    if is_ascii_digits(sequence[0].text) and min_digits <= len(sequence[0].text) <= max_digits:
         return []
     original = "".join(word.text for word in sequence)
     first = original.split(",", 1)[0].split("-", 1)[0].strip()
-    if not first.isdigit() or not min_digits <= len(first) <= max_digits:
+    if not is_ascii_digits(first) or not min_digits <= len(first) <= max_digits:
         return []
 
     x1 = x_at_sequence_char(sequence, len(first))
@@ -355,7 +368,7 @@ def expand_sku_fragments(word: Word, min_digits: int, max_digits: int) -> list[W
     if "," in word.text:
         first = word.text.split(",", 1)[0].strip()
         first = first.split("-", 1)[0].strip()
-        if first.isdigit() and min_digits <= len(first) <= max_digits:
+        if is_ascii_digits(first) and min_digits <= len(first) <= max_digits:
             ratio = len(first) / max(1, len(word.text))
             return [
                 Word(
@@ -372,7 +385,7 @@ def expand_sku_fragments(word: Word, min_digits: int, max_digits: int) -> list[W
 
     if "-" in word.text:
         first = word.text.split("-", 1)[0].strip()
-        if first.isdigit() and min_digits <= len(first) <= max_digits:
+        if is_ascii_digits(first) and min_digits <= len(first) <= max_digits:
             ratio = len(first) / max(1, len(word.text))
             return [
                 Word(
@@ -420,9 +433,513 @@ def detect_boxes(
     product_pages = pages[:-1] if skip_last_page and len(pages) > 1 else pages
     for page in product_pages:
         item_detections = detect_page_boxes(page, min_digits, max_digits, box_padding)
+        item_detections, header_variants = expand_header_shorthand_groups(page, item_detections, min_digits, max_digits)
+        variant_detections = detect_variant_table_rows(page, item_detections, min_digits, max_digits)
+        variant_detections.extend(expand_variant_shorthand_rows(page, variant_detections, min_digits, max_digits))
         detections.extend(item_detections)
-        detections.extend(detect_variant_table_rows(page, item_detections, min_digits, max_digits))
+        detections.extend(dedupe_detections(header_variants + variant_detections))
     return detections
+
+
+def expand_header_shorthand_groups(
+    page: PageText,
+    items: list[dict],
+    min_digits: int,
+    max_digits: int,
+) -> tuple[list[dict], list[dict]]:
+    variants: list[dict] = []
+    for item in items:
+        expression = detection_sku_expression(page, item, header=True)
+        if not contains_sku_expression_punctuation(expression):
+            continue
+        expansion = expand_sku_expression_details(expression, min_digits, max_digits)
+        skus = expansion.skus
+        if len(skus) < 2:
+            continue
+        if expansion.repeated_skus:
+            flag_sku_illustration_error(item, expression, expansion.repeated_skus)
+
+        first_sku = skus[0]
+        old_sku = item["sku"]
+        switched_parent = first_sku != old_sku
+        if switched_parent:
+            logger.info("Switching shorthand parent SKU from %s to %s on page %s", old_sku, first_sku, item["page"])
+            item["sku"] = first_sku
+
+        if switched_parent:
+            adjust_item_box_to_expression(page, item, expression)
+        existing = {item["sku"]}
+        variant_message = (
+            "Header shorthand SKU; brochure shows a 'from' price so exact brochure price is not defined."
+            if item.get("brochure_price_from_marker") or item.get("brochure_price_not_defined")
+            else "Header shorthand SKU; brochure price is the displayed item price."
+        )
+        for sku in skus:
+            if sku in existing:
+                continue
+            existing.add(sku)
+            variants.append(
+                shorthand_variant_detection(
+                    page,
+                    item,
+                    sku,
+                    item.get("brochure_price_text", ""),
+                    item.get("brochure_price"),
+                    variant_message,
+                )
+            )
+
+        logger.info("Expanded header shorthand group: page=%s parent=%s skus=%s", item["page"], item["sku"], ",".join(skus))
+
+    return items, dedupe_detections(variants)
+
+
+def expand_variant_shorthand_rows(
+    page: PageText,
+    variants: list[dict],
+    min_digits: int,
+    max_digits: int,
+) -> list[dict]:
+    expanded: list[dict] = []
+    for variant in variants:
+        expression = detection_sku_expression(page, variant, header=False)
+        if "," not in expression and "-" not in expression:
+            continue
+        if not variant_expression_extends_base_sku(expression, variant["sku"]):
+            continue
+        expansion = expand_sku_expression_details(expression, min_digits, max_digits)
+        skus = expansion.skus
+        if len(skus) < 2:
+            continue
+        if expansion.repeated_skus:
+            flag_sku_illustration_error(variant, expression, expansion.repeated_skus)
+        existing = {variant["sku"]}
+        for sku in skus:
+            if sku in existing:
+                continue
+            existing.add(sku)
+            expanded.append(
+                shorthand_variant_detection(
+                    page,
+                    variant,
+                    sku,
+                    variant.get("brochure_price_text", ""),
+                    variant.get("brochure_price"),
+                    "Table shorthand SKU; brochure price is the displayed row euro price.",
+                )
+            )
+        logger.info(
+            "Expanded table shorthand row: page=%s base=%s skus=%s",
+            variant["page"],
+            variant["sku"],
+            ",".join(skus),
+        )
+    return dedupe_detections(expanded)
+
+
+def variant_expression_extends_base_sku(expression: str, base_sku: str) -> bool:
+    text = str(expression or "").strip()
+    sku = str(base_sku or "").strip()
+    if not sku or not text.startswith(sku):
+        return False
+    tail = text[len(sku) :].lstrip()
+    return tail.startswith((",", "-"))
+
+
+def shorthand_variant_detection(
+    page: PageText,
+    source: dict,
+    sku: str,
+    price_text: str,
+    price: float | None,
+    message: str,
+) -> dict:
+    box = dict(source["box"])
+    price_not_defined = bool(source.get("brochure_price_not_defined") or source.get("brochure_price_from_marker"))
+    return _detection(
+        page,
+        sku,
+        "variant",
+        box,
+        0.72,
+        UNDEFINED_BROCHURE_PRICE_TEXT if price_not_defined else price_text,
+        None if price_not_defined else price,
+        linkable=False,
+        status="",
+        message=message,
+        brochure_price_not_defined=price_not_defined,
+        brochure_price_from_marker=bool(source.get("brochure_price_from_marker")),
+        from_price_text=price_text if price_not_defined else "",
+        from_price=price if price_not_defined else None,
+    )
+
+
+def detection_sku_expression(page: PageText, item: dict, header: bool) -> str:
+    price_left = find_detection_price_left(page, item)
+    box = item["box"]
+    left = max(0.0, box["x"] - (42 if header else 3))
+    right = max(left + 4, price_left - 1.5)
+    if not header:
+        right = max(left + 4, min(right, find_variant_code_column_right(page, item, price_left)))
+    top = max(0.0, box["y"] - 2)
+    if header:
+        bottom = min(box["y"] + box["height"], max(box["y"] + 28, find_detection_price_bottom(page, item)))
+    else:
+        bottom = box["y"] + min(box["height"], 12)
+
+    lines = sku_expression_lines(page, left, right, top, bottom)
+    return " ".join(lines)
+
+
+def find_variant_code_column_right(page: PageText, item: dict, price_left: float) -> float:
+    sku_word = find_detection_sku_word(page, item)
+    if not sku_word:
+        return price_left - 1.5
+
+    header_candidates = [
+        word
+        for word in page.words
+        if 4 <= sku_word.top - word.top <= 55
+        and word.x0 > sku_word.x1 + 2
+        and word.x0 < price_left - 2
+        and not is_priceish_text(word.text)
+        and not is_euro_header(word.text)
+        and not is_leva_header(word.text)
+        and not SKU_RE.search(word.text)
+    ]
+    if not header_candidates:
+        return price_left - 1.5
+
+    next_header = min(header_candidates, key=lambda word: (word.x0, abs(sku_word.top - word.top)))
+    return max(sku_word.x1 + 4, next_header.x0 - 2)
+
+
+def find_detection_sku_word(page: PageText, item: dict) -> Word | None:
+    box = item["box"]
+    sku = item["sku"]
+    candidates = [
+        word
+        for word in page.words
+        if word.text == sku
+        and box["x"] - 3 <= word.x0 <= box["x"] + box["width"] + 3
+        and box["y"] - 3 <= word.top <= box["y"] + box["height"] + 3
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda word: (abs(word.top - box["y"]), word.x0))[0]
+
+
+def find_detection_price_left(page: PageText, item: dict) -> float:
+    match = find_detection_price_word(page, item)
+    if match:
+        return match.x0
+    return item["box"]["x"] + item["box"]["width"]
+
+
+def find_detection_price_bottom(page: PageText, item: dict) -> float:
+    match = find_detection_price_word(page, item)
+    if match:
+        return match.bottom
+    return item["box"]["y"] + 32
+
+
+def find_detection_price_word(page: PageText, item: dict) -> Word | None:
+    price = item.get("brochure_price")
+    price_text = str(item.get("brochure_price_text") or "").strip()
+    if price is None and not price_text:
+        return None
+
+    box = item["box"]
+    candidates: list[Word] = []
+    top = max(0.0, box["y"] - 3)
+    bottom = min(page.height, box["y"] + box["height"] + 3)
+    for word in page.words:
+        if word.x0 < box["x"] - 4 or word.x0 > box["x"] + box["width"] + 4:
+            continue
+        if word.top < top or word.bottom > bottom:
+            continue
+        if price_text and word.text == price_text:
+            candidates.append(word)
+            continue
+        parsed = parse_table_price_word(word.text)
+        if parsed is None:
+            parsed = brochure_price_to_decimal(word.text)
+        if price is not None and parsed is not None and prices_equal(parsed, price):
+            candidates.append(word)
+
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda word: (word.top, word.x0, -word.height))[0]
+
+
+def adjust_item_box_to_expression(page: PageText, item: dict, expression: str) -> None:
+    if not expression:
+        return
+    box = item["box"]
+    price_left = find_detection_price_left(page, item)
+    words = [
+        word
+        for word in page.words
+        if box["y"] - 2 <= word.top <= min(box["y"] + 32, find_detection_price_bottom(page, item) + 1)
+        and word.x0 < price_left - 1
+        and word.x1 >= box["x"] - 42
+        and expression_token_text(word)
+    ]
+    if not words:
+        return
+    new_x = clamp(min(word.x0 for word in words) - HEADER_SKU_TEXT_INSET, 0, page.width)
+    if new_x >= box["x"]:
+        return
+    old_right = box["x"] + box["width"]
+    box["x"] = new_x
+    box["width"] = clamp(old_right - new_x, 8, page.width - new_x)
+
+
+def sku_expression_lines(page: PageText, left: float, right: float, top: float, bottom: float) -> list[str]:
+    words = [
+        word
+        for word in page.words
+        if word.x1 >= left
+        and word.x0 <= right
+        and top <= word.top <= bottom
+        and word.height <= 9
+        and expression_token_text(word)
+        and not is_euro_header(word.text)
+        and not is_leva_header(word.text)
+    ]
+    lines: list[str] = []
+    for line in cluster_words_by_top(words, tolerance=2.3):
+        text = sku_expression_line_text(line)
+        if text:
+            lines.append(text)
+    return lines
+
+
+def sku_expression_line_text(line: list[Word]) -> str:
+    selected: list[tuple[float, float, str]] = []
+    covered_until = -1.0
+    for word in sorted(
+        line,
+        key=lambda item: (
+            item.x0,
+            -item.width,
+            expression_token_noise_score(expression_token_text(item)),
+            -len(expression_token_text(item)),
+        ),
+    ):
+        if word.x1 <= covered_until + 0.3 and is_expression_fragment(word.text):
+            continue
+        text = expression_token_text(word)
+        if not text:
+            continue
+        selected.append((word.x0, word.x1, text))
+        covered_until = max(covered_until, word.x1)
+        if should_cover_original_expression(word):
+            covered_until = max(covered_until, estimated_original_expression_right(word))
+    if not selected:
+        return ""
+
+    parts: list[str] = []
+    previous_right = None
+    for x0, x1, text in sorted(selected, key=lambda item: item[0]):
+        if previous_right is not None and x0 - previous_right > 5:
+            parts.append(" ")
+        parts.append(text)
+        previous_right = max(previous_right or x1, x1)
+    return "".join(parts)
+
+
+def expression_token_noise_score(text: str) -> int:
+    score = 0
+    if re.search(r"\d{2,}\s*-\s*\d{2,}", str(text or "")):
+        score += 2
+    return score
+
+
+def expression_token_text(word: Word) -> str:
+    original = str(word.original_text or "").strip()
+    text = str(word.text or "").strip()
+    if text in {",", "-"}:
+        return text
+    chosen = original if original and (word.comma_primary or contains_sku_expression_punctuation(original)) else text
+    chosen = chosen.replace("\u2013", "-").replace("\u2014", "-")
+    return chosen if re.search(r"\d", chosen) and re.fullmatch(r"[\d,\-\s]+", chosen) else ""
+
+
+def contains_sku_expression_punctuation(text: str) -> bool:
+    return "," in text or "-" in text or "\u2013" in text or "\u2014" in text
+
+
+def should_cover_original_expression(word: Word) -> bool:
+    original = str(word.original_text or "").strip()
+    if not original or original == word.text:
+        return False
+    stripped = original.strip(" ,-")
+    return stripped != word.text
+
+
+def estimated_original_expression_right(word: Word) -> float:
+    original = str(word.original_text or word.text)
+    return word.x0 + word.width * (len(original) / max(1, len(word.text))) + 5
+
+
+def is_expression_fragment(text: str) -> bool:
+    return bool(re.fullmatch(r"[\d,\-]+", str(text or "")))
+
+
+def expand_sku_expression(text: str, min_digits: int, max_digits: int) -> list[str]:
+    return expand_sku_expression_details(text, min_digits, max_digits).skus
+
+
+def expand_sku_expression_details(text: str, min_digits: int, max_digits: int) -> SkuExpansion:
+    cleaned = str(text or "").replace("\u2013", "-").replace("\u2014", "-")
+    tokens = list(re.finditer(r"\d+\s*-\s*\d+|\d+", cleaned))
+    skus: list[str] = []
+    repeated_skus: list[str] = []
+    anchor: str | None = None
+    previous_token = ""
+    previous_short_token = False
+
+    for match in tokens:
+        token = re.sub(r"\s+", "", match.group(0))
+        if token == previous_token and "-" not in token and len(token) < min_digits:
+            continue
+        previous_token = token
+        has_prefix_separator = expression_has_separator_before(cleaned, match.start())
+        has_suffix_separator = expression_has_separator_after(cleaned, match.end())
+        if "-" in token:
+            left, right = token.split("-", 1)
+            if len(left) < min_digits and not has_prefix_separator:
+                previous_short_token = False
+                continue
+            start = complete_sku_token(left, anchor, min_digits, max_digits)
+            if not start:
+                previous_short_token = False
+                continue
+            end = complete_range_end(start, right, min_digits, max_digits)
+            if not end:
+                maybe_add_glued_suffix_token(skus, left, anchor, min_digits, max_digits, repeated_skus)
+                previous_short_token = False
+                continue
+            if not add_sku_range(skus, start, end, repeated_skus):
+                maybe_add_glued_suffix_token(skus, left, anchor, min_digits, max_digits, repeated_skus)
+            if len(left) >= min_digits:
+                anchor = start
+            previous_short_token = len(left) < min_digits
+            continue
+
+        is_short_token = len(token) < min_digits
+        if is_short_token and not has_prefix_separator and not (previous_short_token and has_suffix_separator):
+            previous_short_token = False
+            continue
+        sku = complete_sku_token(token, anchor, min_digits, max_digits)
+        if not sku:
+            previous_short_token = False
+            continue
+        append_unique(skus, sku, repeated_skus)
+        if len(token) >= min_digits:
+            anchor = sku
+        previous_short_token = is_short_token
+
+    return SkuExpansion(skus=skus, repeated_skus=repeated_skus)
+
+
+def expression_has_separator_before(text: str, index: int) -> bool:
+    prefix = str(text or "")[:index].rstrip()
+    return bool(prefix) and prefix[-1] in {",", "-"}
+
+
+def expression_has_separator_after(text: str, index: int) -> bool:
+    suffix = str(text or "")[index:].lstrip()
+    return bool(suffix) and suffix[0] in {","}
+
+
+def maybe_add_glued_suffix_token(
+    skus: list[str],
+    token: str,
+    anchor: str | None,
+    min_digits: int,
+    max_digits: int,
+    repeated_skus: list[str] | None,
+) -> bool:
+    if not anchor or len(token) <= 1 or len(token) >= min_digits:
+        return False
+    first_digit = token[:1]
+    sku = complete_sku_token(first_digit, anchor, min_digits, max_digits)
+    if not sku:
+        return False
+    append_unique(skus, sku, repeated_skus)
+    return True
+
+
+def flag_sku_illustration_error(item: dict, expression: str, repeated_skus: list[str]) -> None:
+    item["status"] = item.get("status") or "sku_illustration_error"
+    repeated = ", ".join(repeated_skus[:8])
+    if len(repeated_skus) > 8:
+        repeated = f"{repeated}, ..."
+    message = f"SKU illustration error: shorthand expression repeats or overlaps SKU(s) {repeated}."
+    item["message"] = append_item_message(item.get("message", ""), message)
+    logger.warning(
+        "SKU illustration shorthand overlap: page=%s sku=%s repeated=%s expression=%s",
+        item.get("page"),
+        item.get("sku"),
+        ",".join(repeated_skus),
+        expression,
+    )
+
+
+def complete_sku_token(token: str, anchor: str | None, min_digits: int, max_digits: int) -> str | None:
+    token = str(token or "").strip()
+    if not is_ascii_digits(token):
+        return None
+    if min_digits <= len(token) <= max_digits:
+        return token
+    if not anchor or len(token) >= len(anchor):
+        return None
+    sku = anchor[: len(anchor) - len(token)] + token
+    return sku if min_digits <= len(sku) <= max_digits else None
+
+
+def complete_range_end(start: str, end_token: str, min_digits: int, max_digits: int) -> str | None:
+    end_token = str(end_token or "").strip()
+    if not is_ascii_digits(end_token):
+        return None
+    if min_digits <= len(end_token) <= max_digits:
+        return end_token
+    if len(end_token) >= len(start):
+        return None
+    sku = start[: len(start) - len(end_token)] + end_token
+    return sku if min_digits <= len(sku) <= max_digits else None
+
+
+def add_sku_range(skus: list[str], start: str, end: str, repeated_skus: list[str] | None = None) -> bool:
+    try:
+        start_int = int(start)
+        end_int = int(end)
+    except ValueError:
+        return False
+    if end_int < start_int:
+        return False
+    if end_int - start_int >= MAX_SHORTHAND_RANGE_ITEMS:
+        logger.warning(
+            "Skipping oversized shorthand SKU range: start=%s end=%s count=%s",
+            start,
+            end,
+            end_int - start_int + 1,
+        )
+        return False
+    width = len(start)
+    for value in range(start_int, end_int + 1):
+        append_unique(skus, str(value).zfill(width), repeated_skus)
+    return True
+
+
+def append_unique(values: list[str], value: str, repeated_values: list[str] | None = None) -> None:
+    if value in values:
+        if repeated_values is not None and value not in repeated_values:
+            repeated_values.append(value)
+        return
+    values.append(value)
 
 
 def attach_variant_parent_groups(detections: list[dict]) -> list[dict]:
@@ -453,6 +970,31 @@ def attach_variant_parent_groups(detections: list[dict]) -> list[dict]:
         parent["box_type"] = "complex"
         groups.append({"parent": parent, "variants": variants_sorted, "skus": skus})
     return groups
+
+
+def flag_repeated_page_skus(detections: list[dict]) -> None:
+    by_page_sku: dict[tuple[int, str], list[dict]] = {}
+    for item in detections:
+        by_page_sku.setdefault((item["page"], item["sku"]), []).append(item)
+
+    for (page, sku), items in by_page_sku.items():
+        if len(items) < 2:
+            continue
+        message = f"SKU repeats {len(items)} times on page {page}."
+        for item in items:
+            item["status"] = "repeating_item"
+            item["message"] = append_item_message(item.get("message", ""), message)
+        logger.warning("Repeated SKU on same page: page=%s sku=%s count=%s", page, sku, len(items))
+
+
+def append_item_message(current: str, extra: str) -> str:
+    current = str(current or "").strip()
+    extra = str(extra or "").strip()
+    if not current:
+        return extra
+    if not extra or extra in current:
+        return current
+    return f"{current} {extra}"
 
 
 def find_parent_item_for_variant(variant: dict, items: list[dict]) -> dict | None:
@@ -514,14 +1056,14 @@ def merged_variant_sku_prefix(
     min_digits: int,
     max_digits: int,
 ) -> Word | None:
-    if not word.text.isdigit() or len(word.text) <= min_digits or word.height > 8.8:
+    if not is_ascii_digits(word.text) or len(word.text) <= min_digits or word.height > 8.8:
         return None
 
     fragments = [
         other
         for other in words
         if other is not word
-        and other.text.isdigit()
+        and is_ascii_digits(other.text)
         and len(other.text) < len(word.text)
         and abs(other.mid_y - word.mid_y) <= 1.8
         and other.x0 >= word.x0 - 0.5
@@ -603,8 +1145,19 @@ def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padd
                 "width": clamp(next_x - x + box_padding, 8, page.width - x),
                 "height": clamp(row_end - row_start + box_padding * 2, 8, page.height - row_start),
             }
-            brochure_price_text, brochure_price = find_brochure_price(page, box, word)
-            detections.append(_detection(page, word.text, "item", box, 0.88, brochure_price_text, brochure_price))
+            brochure_price_text, brochure_price, brochure_price_from_marker = find_brochure_price(page, box, word)
+            detections.append(
+                _detection(
+                    page,
+                    word.text,
+                    "item",
+                    box,
+                    0.88,
+                    brochure_price_text,
+                    brochure_price,
+                    brochure_price_from_marker=brochure_price_from_marker,
+                )
+            )
 
     seen: set[tuple] = set()
     clean: list[dict] = []
@@ -752,7 +1305,7 @@ def normalized_table_price_tokens(tokens: list[Word]) -> list[Word]:
 
 
 def is_overlapped_price_noise(word: Word, tokens: list[Word]) -> bool:
-    if not word.text.isdigit() or len(word.text) < 5:
+    if not is_ascii_digits(word.text) or len(word.text) < 5:
         return False
     pieces = [
         other
@@ -869,10 +1422,13 @@ def table_price_issue(
     leva_candidate = None
     if second_window:
         second_left, second_right = second_window
+        second_left_tolerance = 6.0
         second_candidates = [
             candidate
             for candidate in all_price_candidates
-            if second_left <= candidate[0] and candidate[1] <= second_right
+            if second_left - second_left_tolerance <= candidate[0]
+            and candidate[1] <= second_right
+            and candidate[0] > euro_candidate[1] + 0.5
         ]
         if second_candidates:
             leva_candidate = sorted(second_candidates, key=lambda item: item[0])[0]
@@ -1034,6 +1590,7 @@ def detect_header_driven_boxes(
             "height": clamp(bottom - header["top"] + box_padding * 2, 8, page.height - header["top"]),
         }
         price_text = header["price_word"].text
+        price_from_marker = has_from_price_marker(page, box, header["price_word"])
         detections.append(
             _detection(
                 page,
@@ -1043,6 +1600,7 @@ def detect_header_driven_boxes(
                 0.94,
                 price_text,
                 brochure_price_to_decimal(price_text),
+                brochure_price_from_marker=price_from_marker,
             )
         )
 
@@ -1101,13 +1659,13 @@ def is_variant_table_sku_word(page: PageText, word: Word, min_digits: int, max_d
 
 
 def is_sku_range_continuation(page: PageText, word: Word, row: list[Word]) -> bool:
-    if not word.text.isdigit():
+    if not is_ascii_digits(word.text):
         return False
     previous_skus = [
         other
         for other in row
         if other is not word
-        and other.text.isdigit()
+        and is_ascii_digits(other.text)
         and other.x1 < word.x0
         and abs(other.mid_y - word.mid_y) <= 4
     ]
@@ -1125,7 +1683,7 @@ def is_sku_range_continuation(page: PageText, word: Word, row: list[Word]) -> bo
 
 
 def is_header_price_word(word: Word, sku_word: Word, right_edge: float) -> bool:
-    if not word.text.isdigit():
+    if not is_ascii_digits(word.text):
         return False
     if not 3 <= len(word.text) <= 6:
         return False
@@ -1139,7 +1697,7 @@ def is_header_price_word(word: Word, sku_word: Word, right_edge: float) -> bool:
 
 def find_split_header_price_words(page: PageText, sku_word: Word, right_edge: float) -> list[Word]:
     split_prices: list[Word] = []
-    digits = [word for word in page.words if word.text.isdigit()]
+    digits = [word for word in page.words if is_ascii_digits(word.text)]
     for whole in digits:
         if not 1 <= len(whole.text) <= 4:
             continue
@@ -1187,7 +1745,7 @@ def find_header_price_box_right(
     price_words = [
         word
         for word in page.words
-        if word.text.isdigit()
+        if is_ascii_digits(word.text)
         and word.height >= 13
         and word.x0 >= sku_word.x0 + 8
         and word.x0 < default_right_edge - 1
@@ -1247,13 +1805,36 @@ def dedupe_detections(detections: list[dict]) -> list[dict]:
         key = (item["page"], item["sku"], round(item["box"]["x"]), round(item["box"]["y"]))
         if key in seen:
             continue
+        if is_near_duplicate_detection(item, clean):
+            continue
         seen.add(key)
         clean.append(item)
     return clean
 
 
+def is_near_duplicate_detection(item: dict, existing: list[dict]) -> bool:
+    box = item["box"]
+    for other in existing:
+        other_box = other["box"]
+        if item["page"] != other["page"] or item["sku"] != other["sku"]:
+            continue
+        if item.get("box_type") != other.get("box_type"):
+            continue
+        if str(item.get("brochure_price_text") or "") != str(other.get("brochure_price_text") or ""):
+            continue
+        if abs(box["x"] - other_box["x"]) > 2 or abs(box["width"] - other_box["width"]) > 4:
+            continue
+        if abs(box["y"] - other_box["y"]) <= 6:
+            return True
+    return False
+
+
 def is_sku(text: str, min_digits: int, max_digits: int) -> bool:
-    return text.isdigit() and min_digits <= len(text) <= max_digits
+    return is_ascii_digits(text) and min_digits <= len(text) <= max_digits
+
+
+def is_ascii_digits(text: str) -> bool:
+    return bool(ASCII_DIGITS_RE.fullmatch(str(text or "")))
 
 
 def is_primary_sku(page: PageText, word: Word, offset: float) -> bool:
@@ -1284,7 +1865,7 @@ def is_after_comma_continuation(page: PageText, word: Word, min_digits: int, max
         if not original.endswith(","):
             continue
         first = original.split(",", 1)[0].strip()
-        if first.isdigit() and min_digits <= len(first) <= max_digits:
+        if is_ascii_digits(first) and min_digits <= len(first) <= max_digits:
             return True
     return False
 
@@ -1293,7 +1874,7 @@ def same_line_words(page: PageText, word: Word, tolerance: float) -> list[Word]:
     return sorted([other for other in page.words if abs(other.mid_y - word.mid_y) <= tolerance], key=lambda item: item.x0)
 
 
-def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str, float | None]:
+def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str, float | None, bool]:
     top_limit = box["y"] - 2
     bottom_limit = min(box["y"] + 78, sku_word.bottom + 18)
     left = box["x"]
@@ -1301,7 +1882,7 @@ def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str,
     candidates: list[Word] = []
 
     for word in page.words:
-        if not word.text.isdigit():
+        if not is_ascii_digits(word.text):
             continue
         if not 3 <= len(word.text) <= 6:
             continue
@@ -1315,11 +1896,30 @@ def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str,
         candidates.append(word)
 
     if not candidates:
-        return "", None
+        return "", None, False
 
     candidates.sort(key=lambda item: (abs(item.top - sku_word.top), -item.height))
-    raw = candidates[0].text
-    return raw, brochure_price_to_decimal(raw)
+    price_word = candidates[0]
+    raw = price_word.text
+    return raw, brochure_price_to_decimal(raw), has_from_price_marker(page, box, price_word)
+
+
+def has_from_price_marker(page: PageText, box: dict, price_word: Word) -> bool:
+    for word in page.words:
+        if not is_from_price_marker(word.text):
+            continue
+        if word.x0 < box["x"] - 6 or word.x1 > price_word.x0 + 3:
+            continue
+        if not 0 <= price_word.x0 - word.x1 <= 36:
+            continue
+        if abs(word.mid_y - price_word.mid_y) <= 18:
+            return True
+    return False
+
+
+def is_from_price_marker(text: str) -> bool:
+    cleaned = re.sub(r"[^A-Za-zА-Яа-я]", "", str(text or "")).casefold()
+    return cleaned in {"ot", "от"}
 
 
 def find_footer_top(page) -> float | None:
@@ -1342,7 +1942,7 @@ def find_footer_top(page) -> float | None:
 
 
 def brochure_price_to_decimal(raw: str) -> float | None:
-    if not raw.isdigit():
+    if not is_ascii_digits(raw):
         return None
     return round(int(raw) / 100, 2)
 
@@ -1378,7 +1978,18 @@ def attach_price_comparisons(detections: list[dict], resolved: dict[str, dict]) 
         brochure_price = item.get("brochure_price")
         website_price = resolved.get(sku, {}).get("website_price")
         item["website_price"] = website_price
-        if brochure_price is None:
+
+    apply_from_price_selection(detections, "website_price", "website_from_price_candidate")
+    update_from_price_display(detections)
+
+    for item in detections:
+        sku = item["sku"]
+        brochure_price, not_defined = comparison_brochure_price(item, "website_from_price_candidate")
+        website_price = item.get("website_price")
+        if not_defined:
+            item["price_status"] = "brochure_price_not_defined"
+            item["price_message"] = from_price_not_defined_message(item)
+        elif brochure_price is None:
             item["price_status"] = "no_brochure_price"
             item["price_message"] = "No brochure price was detected."
         elif website_price is None:
@@ -1402,22 +2013,35 @@ def attach_excel_comparisons(detections: list[dict], excel_prices: dict[str, dic
         else:
             item["excel_price"] = None
 
-        status, message = compare_two_prices(
-            item.get("brochure_price"),
-            item.get("excel_price"),
-            "Excel",
-        )
-        item["excel_status"] = status
-        item["excel_message"] = message
+    apply_from_price_selection(detections, "excel_price", "excel_from_price_candidate")
+    update_from_price_display(detections)
+
+    for item in detections:
+        brochure_price, not_defined = comparison_brochure_price(item, "excel_from_price_candidate")
+        if not_defined:
+            item["excel_status"] = "brochure_price_not_defined"
+            item["excel_message"] = from_price_not_defined_message(item)
+        else:
+            status, message = compare_two_prices(
+                brochure_price,
+                item.get("excel_price"),
+                "Excel",
+            )
+            item["excel_status"] = status
+            item["excel_message"] = message
 
 
 def attach_triple_comparisons(detections: list[dict]) -> None:
+    update_from_price_display(detections)
     for item in detections:
-        brochure_price = item.get("brochure_price")
+        brochure_price, not_defined = triple_brochure_price(item)
         website_price = item.get("website_price") or None
         excel_price = item.get("excel_price")
 
-        if brochure_price is None:
+        if not_defined:
+            item["triple_status"] = "brochure_price_not_defined"
+            item["triple_message"] = from_price_not_defined_message(item)
+        elif brochure_price is None:
             item["triple_status"] = "no_brochure_price"
             item["triple_message"] = "No brochure price was detected."
         elif website_price is None:
@@ -1432,6 +2056,116 @@ def attach_triple_comparisons(detections: list[dict]) -> None:
         else:
             item["triple_status"] = "different"
             item["triple_message"] = "At least one of brochure, website, or Excel price is different."
+
+
+def apply_from_price_selection(detections: list[dict], source_price_key: str, selection_key: str) -> None:
+    for item in detections:
+        if is_from_price_detection(item):
+            item[selection_key] = False
+
+    for group in from_price_groups(detections):
+        priced_items = [
+            item
+            for item in group
+            if item.get(source_price_key) is not None
+        ]
+        if not priced_items:
+            logger.info(
+                "No source prices available for 'from' price selection: key=%s parent=%s skus=%s",
+                source_price_key,
+                group[0].get("parent_sku") or group[0].get("sku"),
+                ",".join(item["sku"] for item in group),
+            )
+            continue
+
+        lowest_price = min(float(item[source_price_key]) for item in priced_items)
+        selected = [
+            item
+            for item in priced_items
+            if prices_equal(float(item[source_price_key]), lowest_price)
+        ]
+        for item in selected:
+            item[selection_key] = True
+        logger.info(
+            "Selected 'from' price SKU(s): key=%s price=%.2f selected=%s group=%s",
+            source_price_key,
+            lowest_price,
+            ",".join(item["sku"] for item in selected),
+            ",".join(item["sku"] for item in group),
+        )
+
+
+def from_price_groups(detections: list[dict]) -> list[list[dict]]:
+    grouped: dict[tuple[int, str], list[dict]] = {}
+    for item in detections:
+        if not is_from_price_detection(item):
+            continue
+        key = (int(item["page"]), str(item.get("parent_sku") or item["sku"]))
+        grouped.setdefault(key, []).append(item)
+    return [
+        sorted(items, key=lambda item: (item.get("parent_sku") != "", item["box"]["y"], item["box"]["x"], item["sku"]))
+        for items in grouped.values()
+    ]
+
+
+def is_from_price_detection(item: dict) -> bool:
+    return bool(item.get("brochure_price_from_marker"))
+
+
+def comparison_brochure_price(item: dict, selection_key: str) -> tuple[float | None, bool]:
+    if not is_from_price_detection(item):
+        return item.get("brochure_price"), bool(item.get("brochure_price_not_defined"))
+    if not item.get(selection_key):
+        return None, True
+    return item_from_price(item), False
+
+
+def triple_brochure_price(item: dict) -> tuple[float | None, bool]:
+    if not is_from_price_detection(item):
+        return item.get("brochure_price"), bool(item.get("brochure_price_not_defined"))
+    if not (item.get("website_from_price_candidate") and item.get("excel_from_price_candidate")):
+        return None, True
+    return item_from_price(item), False
+
+
+def update_from_price_display(detections: list[dict]) -> None:
+    for item in detections:
+        if not is_from_price_detection(item):
+            continue
+        if "website_from_price_candidate" not in item and "excel_from_price_candidate" not in item:
+            continue
+        selected = bool(
+            item.get("website_from_price_candidate")
+            or item.get("excel_from_price_candidate")
+        )
+        if selected:
+            item["brochure_price"] = item_from_price(item)
+            item["brochure_price_text"] = item_from_price_text(item)
+            item["brochure_price_not_defined"] = False
+        else:
+            item["brochure_price"] = None
+            item["brochure_price_text"] = UNDEFINED_BROCHURE_PRICE_TEXT
+            item["brochure_price_not_defined"] = True
+
+
+def item_from_price(item: dict) -> float | None:
+    if item.get("from_price") is not None:
+        return item.get("from_price")
+    return item.get("brochure_price")
+
+
+def item_from_price_text(item: dict) -> str:
+    text = str(item.get("from_price_text") or "").strip()
+    if text:
+        return text
+    price = item_from_price(item)
+    return f"{float(price):.2f}" if price is not None else ""
+
+
+def from_price_not_defined_message(item: dict) -> str:
+    if is_from_price_detection(item):
+        return "Brochure shows a 'from' price; only the lowest priced SKU in this item box is compared."
+    return "Brochure shows a 'from' price; exact SKU price is not defined."
 
 
 def mark_triple_not_checked(detections: list[dict]) -> None:
@@ -1475,6 +2209,11 @@ def apply_grouped_search_links(
         parent = group["parent"]
         titles = group_website_titles(skus, resolved)
         if len(titles) < 2:
+            mark_group_title_missing(
+                parent,
+                resolved,
+                "Grouped product-name link was not created because product titles were not available.",
+            )
             logger.info(
                 "Skipping grouped search link without enough website titles: parent=%s skus=%s titles=%s",
                 parent["sku"],
@@ -1486,14 +2225,24 @@ def apply_grouped_search_links(
         try:
             url, query = make_group_search_url_from_titles(titles)
         except ValueError:
+            mark_group_title_missing(
+                parent,
+                resolved,
+                "Grouped product-name link could not be built from the product titles.",
+            )
             logger.warning(
-                "Could not build grouped search query: parent=%s skus=%s",
+                "Could not build grouped title query: parent=%s skus=%s",
                 parent["sku"],
                 ",".join(skus),
             )
             continue
 
-        logger.info("Prepared grouped search link: parent=%s skus=%s query=%s", parent["sku"], ",".join(skus), query)
+        logger.info(
+            "Prepared grouped search link: parent=%s skus=%s source=titles query=%s",
+            parent["sku"],
+            ",".join(skus),
+            query,
+        )
         prepared.append({"group": group, "skus": skus, "parent": parent, "url": url, "query": query})
 
     count_results: dict[str, dict] = {}
@@ -1595,6 +2344,22 @@ def apply_grouped_search_links(
             "group_missing_skus": missing_skus,
             "group_extra_skus": extra_skus,
         }
+
+
+def mark_group_title_missing(parent: dict, resolved: dict[str, dict], message: str) -> None:
+    sku = parent["sku"]
+    parent["status"] = parent.get("status") or "group_title_missing"
+    parent["message"] = append_item_message(parent.get("message", ""), message)
+    existing = resolved.get(sku, {})
+    resolved[sku] = {
+        **existing,
+        "sku": sku,
+        "status": "group_title_missing",
+        "source": "search-fallback",
+        "url": search_url_for_sku(sku),
+        "title": f"Praktis search for {sku}",
+        "message": append_item_message(existing.get("message", ""), message),
+    }
 
 
 def group_website_titles(skus: list[str], resolved: dict[str, dict]) -> list[str]:
@@ -1805,7 +2570,15 @@ def _detection(
     linkable: bool = True,
     status: str = "",
     message: str = "",
+    brochure_price_not_defined: bool = False,
+    brochure_price_from_marker: bool = False,
+    from_price_text: str = "",
+    from_price: float | None = None,
 ) -> dict:
+    if brochure_price_from_marker and from_price is None:
+        from_price = brochure_price
+    if brochure_price_from_marker and not from_price_text:
+        from_price_text = brochure_price_text
     return {
         "page": page.page_number,
         "sku": sku,
@@ -1814,6 +2587,10 @@ def _detection(
         "confidence": confidence,
         "brochure_price_text": brochure_price_text,
         "brochure_price": brochure_price,
+        "brochure_price_not_defined": brochure_price_not_defined,
+        "brochure_price_from_marker": brochure_price_from_marker,
+        "from_price_text": from_price_text,
+        "from_price": from_price,
         "linkable": linkable,
         "status": status,
         "message": message,

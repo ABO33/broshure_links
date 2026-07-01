@@ -28,6 +28,7 @@ const tableState = {
   textFilters: {
     page: "",
     sku: "",
+    parent_sku: "",
     box_type: "",
     brochure_price: "",
     website_price: "",
@@ -46,8 +47,11 @@ const labels = {
   search_only: "Search only",
   link_not_found: "Link not found",
   price_only: "Price only",
+  repeating_item: "Repeating item",
   table_header_error: "Table header error",
+  sku_illustration_error: "SKU illustration error",
   grouped_search: "Grouped search",
+  group_title_missing: "Group title missing",
   group_count_mismatch: "Group count mismatch",
   group_count_unknown: "Group count unknown",
   blocked: "Blocked",
@@ -57,6 +61,7 @@ const labels = {
   different: "Different",
   no_url: "No URL",
   no_brochure_price: "No brochure price",
+  brochure_price_not_defined: "Brochure price not defined",
   no_website_price: "No website price",
   no_excel_price: "No Excel price",
   not_found: "Not found",
@@ -68,6 +73,7 @@ const labels = {
 const excelColumns = [
   ["page", "Page"],
   ["sku", "SKU"],
+  ["parent_sku", "Parent SKU"],
   ["status", "Status"],
   ["box_type", "Box"],
   ["brochure_price", "Brochure price"],
@@ -156,7 +162,7 @@ form.addEventListener("submit", async (event) => {
       : completionMessage(payload.summary.mode);
   } catch (error) {
     lastResult = null;
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="8">${escapeHtml(error.message)}</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">${escapeHtml(error.message)}</td></tr>`;
     resultHint.textContent = "Processing failed.";
   } finally {
     setBusy(false);
@@ -334,17 +340,17 @@ function renderRows() {
 
   const rows = getVisibleRows();
   if (!lastResult) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="11">No file processed yet.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">No file processed yet.</td></tr>`;
     return;
   }
 
   if (!lastResult?.rows?.length) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="11">No readable SKU codes were found.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">No readable SKU codes were found.</td></tr>`;
     return;
   }
 
   if (!rows.length) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="11">No rows match the current filters.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">No rows match the current filters.</td></tr>`;
     return;
   }
 
@@ -364,9 +370,10 @@ function rowToHtml(row) {
     <tr>
       <td>${row.page}</td>
       <td>${escapeHtml(row.sku)}</td>
+      <td>${escapeHtml(row.parent_sku || "")}</td>
       <td>${badgeHtml(status)}</td>
       <td>${escapeHtml(row.box_type)}</td>
-      <td>${formatPrice(row.brochure_price)}</td>
+      <td>${formatBrochurePrice(row)}</td>
       <td>${formatPrice(row.website_price)}</td>
       <td>${formatPrice(row.excel_price)}</td>
       <td title="${escapeAttr(row.price_message || "")}">${priceStatus === "not_checked" ? `<span class="muted-cell">Not checked</span>` : badgeHtml(priceStatus)}</td>
@@ -401,7 +408,8 @@ function getVisibleRows() {
 }
 
 function getTextFilterValue(row, key) {
-  if (key === "brochure_price" || key === "website_price" || key === "excel_price") return formatPrice(row[key]);
+  if (key === "brochure_price") return formatBrochurePrice(row);
+  if (key === "website_price" || key === "excel_price") return formatPrice(row[key]);
   if (key === "url") return [row.url, row.title, row.message].filter(Boolean).join(" ");
   return String(row[key] ?? "");
 }
@@ -597,11 +605,12 @@ function buildWorksheetXml(rows, hyperlinks) {
   <cols>
     <col min="1" max="1" width="9" customWidth="1"/>
     <col min="2" max="2" width="14" customWidth="1"/>
-    <col min="3" max="3" width="16" customWidth="1"/>
-    <col min="4" max="4" width="12" customWidth="1"/>
-    <col min="5" max="7" width="16" customWidth="1"/>
-    <col min="8" max="10" width="18" customWidth="1"/>
-    <col min="11" max="11" width="46" customWidth="1"/>
+    <col min="3" max="3" width="14" customWidth="1"/>
+    <col min="4" max="4" width="16" customWidth="1"/>
+    <col min="5" max="5" width="12" customWidth="1"/>
+    <col min="6" max="8" width="16" customWidth="1"/>
+    <col min="9" max="11" width="18" customWidth="1"/>
+    <col min="12" max="12" width="46" customWidth="1"/>
   </cols>
   <sheetData>
     <row r="1" ht="24" customHeight="1">${header}</row>
@@ -614,6 +623,9 @@ function buildWorksheetXml(rows, hyperlinks) {
 function excelCellForColumn(key, columnIndex, rowNumber, row) {
   const column = columnName(columnIndex);
   if (key === "page") return numberCell(column, rowNumber, row.page, 2);
+  if (key === "brochure_price" && row.brochure_price_not_defined) {
+    return cell(column, rowNumber, row.brochure_price_text || "Not defined", 7);
+  }
   if (["brochure_price", "website_price", "excel_price"].includes(key)) {
     return numberCell(column, rowNumber, row[key], 3);
   }
@@ -914,6 +926,11 @@ function formatPrice(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "";
   return number.toFixed(2);
+}
+
+function formatBrochurePrice(row) {
+  if (row?.brochure_price_not_defined) return row.brochure_price_text || "Not defined";
+  return formatPrice(row?.brochure_price);
 }
 
 function escapeHtml(value) {

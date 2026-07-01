@@ -165,6 +165,7 @@
               <colgroup>
                 <col class="col-page">
                 <col class="col-sku">
+                <col class="col-parent-sku">
                 <col class="col-status">
                 <col class="col-box">
                 <col class="col-brochure">
@@ -190,6 +191,14 @@
                       <span class="th-label">SKU</span>
                       <span class="filter-field">
                         <input id="skuFilter" class="column-filter" data-query-key="sku" type="search" placeholder="SKU" autocomplete="off">
+                      </span>
+                    </div>
+                  </th>
+                  <th>
+                    <div class="th-stack">
+                      <span class="th-label">Parent SKU</span>
+                      <span class="filter-field">
+                        <input id="parentSkuFilter" class="column-filter" data-query-key="parent_sku" type="search" placeholder="Parent" autocomplete="off">
                       </span>
                     </div>
                   </th>
@@ -272,7 +281,7 @@
                 </tr>
               </thead>
               <tbody id="resultsBody">
-                <tr class="empty"><td colspan="11">No file processed yet.</td></tr>
+                <tr class="empty"><td colspan="12">No file processed yet.</td></tr>
               </tbody>
             </table>
           </div>
