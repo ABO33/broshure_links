@@ -52,6 +52,7 @@ class PageText:
     height: float
     words: list[Word]
     footer_top: float | None = None
+    image_blocks: list[dict] | None = None
 
 
 @dataclass
@@ -301,7 +302,17 @@ def extract_text_pages(pdf_bytes: bytes, min_digits: int = 5, max_digits: int = 
                 base_words.append(base)
                 words.extend(expand_sku_fragments(base, min_digits, max_digits))
             words.extend(stitch_split_sku_words(base_words, min_digits, max_digits))
-            pages.append(PageText(index, float(page.width), float(page.height), words, find_footer_top(page)))
+            footer_top = float(page.height) if index == 1 else find_footer_top(page)
+            pages.append(
+                PageText(
+                    index,
+                    float(page.width),
+                    float(page.height),
+                    words,
+                    footer_top,
+                    find_large_image_blocks(page),
+                )
+            )
     return pages
 
 
@@ -1581,6 +1592,7 @@ def detect_header_driven_boxes(
     detections: list[dict] = []
     for header in headers:
         bottom = find_next_header_top(header, headers, footer_top)
+        bottom = find_large_image_boundary_top(page, header, headers, bottom)
         if bottom <= header["top"] + 18:
             continue
         box = {
@@ -1798,6 +1810,51 @@ def find_next_header_top(current: dict, headers: list[dict], footer_top: float) 
     return bottom
 
 
+def find_large_image_boundary_top(page: PageText, current: dict, headers: list[dict], proposed_bottom: float) -> float:
+    image_blocks = page.image_blocks or []
+    if not image_blocks:
+        return proposed_bottom
+
+    row_peers = [
+        header
+        for header in headers
+        if header is not current
+        and abs(header["top"] - current["top"]) <= 14
+        and min(header["right"], current["right"]) - max(header["left"], current["left"]) <= HEADER_EDGE_TOUCH_TOLERANCE
+    ]
+    if not row_peers:
+        return proposed_bottom
+
+    left = current["left"]
+    right = current["right"]
+    current_width = max(1.0, right - left)
+    candidates: list[float] = []
+    for block in image_blocks:
+        top = float(block["top"])
+        if top <= current["top"] + 85:
+            continue
+        if top >= proposed_bottom - 18:
+            continue
+        if top < page.height * 0.35:
+            continue
+        overlap = min(right, float(block["x1"])) - max(left, float(block["x0"]))
+        if overlap < max(35.0, current_width * 0.25):
+            continue
+        candidates.append(top)
+
+    if candidates:
+        boundary = min(candidates)
+        logger.info(
+            "Limiting item box at large image boundary: page=%s sku=%s top=%.1f imageTop=%.1f",
+            page.page_number,
+            current["word"].text,
+            current["top"],
+            boundary,
+        )
+        return min(proposed_bottom, boundary)
+    return proposed_bottom
+
+
 def dedupe_detections(detections: list[dict]) -> list[dict]:
     seen: set[tuple] = set()
     clean: list[dict] = []
@@ -1920,6 +1977,39 @@ def has_from_price_marker(page: PageText, box: dict, price_word: Word) -> bool:
 def is_from_price_marker(text: str) -> bool:
     cleaned = re.sub(r"[^A-Za-zА-Яа-я]", "", str(text or "")).casefold()
     return cleaned in {"ot", "от"}
+
+
+def find_large_image_blocks(page) -> list[dict]:
+    blocks: list[dict] = []
+    page_width = float(page.width)
+    page_height = float(page.height)
+    for image in getattr(page, "images", []):
+        try:
+            x0 = float(image["x0"])
+            x1 = float(image["x1"])
+            top = float(image["top"])
+            bottom = float(image["bottom"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        width = x1 - x0
+        height = bottom - top
+        if width < page_width * 0.82:
+            continue
+        if height < page_height * 0.18:
+            continue
+        if x0 > page_width * 0.08 or x1 < page_width * 0.92:
+            continue
+        blocks.append(
+            {
+                "x0": x0,
+                "x1": x1,
+                "top": top,
+                "bottom": bottom,
+                "width": width,
+                "height": height,
+            }
+        )
+    return sorted(blocks, key=lambda block: (block["top"], block["x0"]))
 
 
 def find_footer_top(page) -> float | None:
