@@ -37,15 +37,59 @@ You can also change the port:
 python app.py --port 8080
 ```
 
+## Run With Docker
+
+From this folder, run:
+
+```powershell
+.\docker-start.cmd
+```
+
+That script pulls the latest committed changes, opens a dedicated Windows Chrome
+profile for the Praktis service, and starts Docker Compose. The app is available
+at:
+
+```text
+http://127.0.0.1:5174
+```
+
+Other computers on the same network can open:
+
+```text
+http://YOUR-COMPUTER-IP:5174
+```
+
+The dedicated Chrome profile is stored at:
+
+```text
+%USERPROFILE%\PraktisServiceChrome
+```
+
+The first time you run Docker mode, sign in and pass any Praktis/Cloudflare
+challenge in the Chrome window that opens. After that, Docker connects to this
+same Windows Chrome profile through `http://host.docker.internal:9222`, so it can
+reuse the trusted browser session instead of using an isolated Docker browser.
+
+To start the service automatically after Windows login, run once:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install-startup-task.ps1
+```
+
+To remove that startup task:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall-startup-task.ps1
+```
+
 ## What It Does
 
 - Upload a brochure PDF.
-- Process the whole brochure or only one selected page.
+- Process the whole brochure, one selected page, or a page range.
 - Extract readable text-layer SKUs from 5 to 12 digits.
 - Skip SKU codes that are only inside images.
-- If a SKU line contains comma-separated values, only the first value before the comma is used.
-- Variant SKU tables are included in the report for price comparison; they do not create separate PDF link boxes.
-- Resolve URLs from an optional CSV/JSON mapping file.
+- Expand supported comma/range shorthand SKU groups into complex item groups.
+- Include variant SKU tables in the report for price comparison; they do not create separate PDF link boxes.
 - Fall back to `https://praktis.bg/catalogsearch/result?q={sku}` when selected.
 - Optionally find Praktis product links and compare the brochure euro price with the Praktis euro price using a Playwright-controlled Chrome session.
 - Optionally upload an `.xlsx` price file and compare brochure prices with Excel column M SKUs and column U prices.
@@ -53,43 +97,17 @@ python app.py --port 8080
 - Write invisible PDF link annotations over detected item boxes.
 - Download the linked PDF plus Excel/JSON reports.
 
-## Mapping File
-
-CSV:
-
-```csv
-sku,url,title
-35535079,https://praktis.bg/example-product,Optional title
-```
-
-JSON:
-
-```json
-[
-  { "sku": "35535079", "url": "https://praktis.bg/example-product", "title": "Optional title" }
-]
-```
-
-or:
-
-```json
-{
-  "35535079": "https://praktis.bg/example-product"
-}
-```
-
 ## Notes
 
 The app can create useful search links even if Praktis blocks automated product
-page verification. Exact product links are best supplied through the mapping
-file when live lookup is blocked.
+page verification.
 
 Price comparison uses the first euro price found on the product page or SKU
-search-result page through Playwright/Chrome. The browser runs headless by
-default and its profile defaults to `C:\PraktisProfile`, matching the working
-scraper style, so Cloudflare cookies can persist between runs. Set
-`PRAKTIS_HEADLESS=0` before starting the app if you need to see the browser for
-debugging.
+search-result page through Playwright/Chrome. In Docker mode, the scraper uses
+the dedicated Windows Chrome profile opened by `launch-service-chrome.ps1`.
+Without Docker, it uses Playwright's persistent browser profile and runs
+headless by default. Set `PRAKTIS_HEADLESS=0` before starting the app if you
+need to see that non-Docker browser for debugging.
 
 If the browser lookup cannot load or verify an exact product page, the generated
 PDF uses the SKU search URL, for example

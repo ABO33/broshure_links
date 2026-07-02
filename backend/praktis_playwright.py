@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from html import unescape
 import logging
 import os
@@ -26,6 +27,7 @@ GROUP_DELAY_MIN_MS = int(os.environ.get("PRAKTIS_GROUP_DELAY_MIN_MS", "150"))
 GROUP_DELAY_MAX_MS = int(os.environ.get("PRAKTIS_GROUP_DELAY_MAX_MS", "600"))
 PROFILE_DIR = os.environ.get("PRAKTIS_PROFILE", str(DEFAULT_PROFILE_DIR))
 CHROME_CHANNEL = os.environ.get("PRAKTIS_CHANNEL", "chrome")
+CDP_URL = os.environ.get("PRAKTIS_CDP_URL", "").strip()
 HEADLESS = os.environ.get("PRAKTIS_HEADLESS", "1").lower() in {"1", "true", "yes"}
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -41,6 +43,19 @@ try:
 except Exception:  # pragma: no cover - exercised when dependency is missing.
     PlaywrightTimeoutError = TimeoutError
     async_playwright = None
+
+
+@dataclass
+class BrowserSession:
+    context: object
+    temp_profile: tempfile.TemporaryDirectory | None = None
+    external: bool = False
+
+    async def close(self) -> None:
+        if not self.external:
+            await self.context.close()
+        if self.temp_profile:
+            self.temp_profile.cleanup()
 
 
 def compare_prices_with_playwright(skus: list[str]) -> dict[str, dict]:
@@ -144,16 +159,15 @@ async def _run_batch(skus: list[str]) -> list[dict]:
     Path(PROFILE_DIR).mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as p:
-        context, temp_profile = await _launch_browser_context(p)
+        session = await _launch_browser_context(p)
+        context = session.context
 
         await _warm_session(context)
         tasks = [asyncio.create_task(_scrape_one_sku(context, sku, sem)) for sku in skus]
         try:
             return await asyncio.gather(*tasks)
         finally:
-            await context.close()
-            if temp_profile:
-                temp_profile.cleanup()
+            await session.close()
 
 
 async def _run_count_batch(requests: list[tuple[str, list[str]]]) -> list[dict]:
@@ -161,7 +175,8 @@ async def _run_count_batch(requests: list[tuple[str, list[str]]]) -> list[dict]:
     Path(PROFILE_DIR).mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as p:
-        context, temp_profile = await _launch_browser_context(p)
+        session = await _launch_browser_context(p)
+        context = session.context
 
         await _warm_session(context)
         tasks = [
@@ -171,23 +186,24 @@ async def _run_count_batch(requests: list[tuple[str, list[str]]]) -> list[dict]:
         try:
             return await asyncio.gather(*tasks)
         finally:
-            await context.close()
-            if temp_profile:
-                temp_profile.cleanup()
+            await session.close()
 
 
 async def _launch_browser_context(p):
     global _PROFILE_LAUNCH_FAILED
+    if CDP_URL:
+        return await _connect_to_external_chrome(p)
+
     if _PROFILE_LAUNCH_FAILED:
         temp_profile = tempfile.TemporaryDirectory(prefix="praktis-profile-")
         try:
-            return await _launch_persistent_context(p, temp_profile.name), temp_profile
+            return BrowserSession(await _launch_persistent_context(p, temp_profile.name), temp_profile=temp_profile)
         except Exception:
             temp_profile.cleanup()
             raise
 
     try:
-        return await _launch_persistent_context(p, PROFILE_DIR), None
+        return BrowserSession(await _launch_persistent_context(p, PROFILE_DIR))
     except Exception as exc:
         _PROFILE_LAUNCH_FAILED = True
         logger.warning(
@@ -197,10 +213,18 @@ async def _launch_browser_context(p):
         )
         temp_profile = tempfile.TemporaryDirectory(prefix="praktis-profile-")
         try:
-            return await _launch_persistent_context(p, temp_profile.name), temp_profile
+            return BrowserSession(await _launch_persistent_context(p, temp_profile.name), temp_profile=temp_profile)
         except Exception:
             temp_profile.cleanup()
             raise
+
+
+async def _connect_to_external_chrome(p) -> BrowserSession:
+    logger.info("Connecting to external Chrome over CDP: %s", CDP_URL)
+    browser = await p.chromium.connect_over_cdp(CDP_URL, timeout=SEARCH_TIMEOUT_MS)
+    if not browser.contexts:
+        raise RuntimeError("External Chrome is connected, but no browser context was exposed.")
+    return BrowserSession(browser.contexts[0], external=True)
 
 
 async def _launch_persistent_context(p, user_data_dir: str):

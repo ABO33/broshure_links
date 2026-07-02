@@ -11,6 +11,7 @@ services:
       BROCHURE_PORT: "5174"
       PRAKTIS_HEADLESS: "1"
       PRAKTIS_CHANNEL: ""
+      PRAKTIS_CDP_URL: "${PRAKTIS_CDP_URL:-http://host.docker.internal:9222}"
       PRAKTIS_PROFILE: "/app/.praktis-browser-profile"
     volumes:
       - praktis-browser-profile:/app/.praktis-browser-profile
