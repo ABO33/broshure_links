@@ -9,5 +9,6 @@ tmp
 output
 data
 .praktis-browser-profile
+.env
 node_modules
 npm-debug.log
