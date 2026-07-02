@@ -1,0 +1,13 @@
+.git
+.agents
+.codex
+.venv
+.vs
+__pycache__
+*.pyc
+tmp
+output
+data
+.praktis-browser-profile
+node_modules
+npm-debug.log

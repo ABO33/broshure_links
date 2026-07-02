@@ -1,0 +1,19 @@
+services:
+  brochure-linker:
+    build:
+      context: .
+    container_name: praktis-brochure-linker
+    ports:
+      - "5174:5174"
+    restart: unless-stopped
+    environment:
+      BROCHURE_HOST: "0.0.0.0"
+      BROCHURE_PORT: "5174"
+      PRAKTIS_HEADLESS: "1"
+      PRAKTIS_CHANNEL: ""
+      PRAKTIS_PROFILE: "/app/.praktis-browser-profile"
+    volumes:
+      - praktis-browser-profile:/app/.praktis-browser-profile
+
+volumes:
+  praktis-browser-profile:

@@ -1,29 +1,29 @@
 <!doctype html>
-<html lang="en">
+<html lang="bg">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Praktis Brochure Linker</title>
+    <title>Линкер за брошури Praktis</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <main class="shell">
       <header class="topbar">
         <div>
-          <h1>Praktis Brochure Linker</h1>
+          <h1>Линкер за брошури Praktis</h1>
         </div>
       </header>
 
       <form id="processForm" class="layout">
         <section class="panel input-panel">
-          <h2>Brochure</h2>
-          <p class="muted">Upload a PDF with readable text SKUs. Image-only SKU artwork is skipped.</p>
+          <h2>Брошура</h2>
+          <p class="muted">Качете PDF с четими кодове. Кодове, които са само в снимка, се пропускат.</p>
 
           <label class="dropzone" for="pdfInput">
             <span class="file-icon">PDF</span>
             <span>
-              <strong id="pdfLabel">Choose brochure PDF</strong>
-              <small>Required</small>
+              <strong id="pdfLabel">Изберете PDF брошура</strong>
+              <small>Задължително</small>
             </span>
             <input id="pdfInput" name="pdf" type="file" accept="application/pdf,.pdf" required>
           </label>
@@ -31,74 +31,74 @@
           <label class="dropzone compact-dropzone" for="excelInput">
             <span class="file-icon sheet-icon">XLSX</span>
             <span>
-              <strong id="excelLabel">Choose price Excel</strong>
-              <small>Required for Excel price modes</small>
+              <strong id="excelLabel">Изберете Excel с цени</strong>
+              <small>Задължително за проверки с Excel</small>
             </span>
             <input id="excelInput" name="excel" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
           </label>
 
           <div class="settings">
             <fieldset class="mode-group">
-              <legend>Options</legend>
+              <legend>Опции</legend>
               <label class="toggle">
                 <input name="mode" type="radio" value="fallback_links" checked>
                 <span>
-                  <strong>Fallback search</strong>
-                  <small>Places only SKU search URLs in the PDF.</small>
+                  <strong>Само търсене по код</strong>
+                  <small>Поставя в PDF само линкове към търсене по код.</small>
                 </span>
               </label>
 
               <label class="toggle">
                 <input name="mode" type="radio" value="website_links_prices">
                 <span>
-                  <strong>Website Link Search with prices</strong>
-                  <small>Finds Praktis product links, compares PDF and website euro prices, and falls back to SKU search.</small>
+                  <strong>Линкове от сайта и проверка на цени</strong>
+                  <small>Търси продуктови линкове в Praktis, сравнява евро цени от PDF и сайта и при нужда използва търсене по код.</small>
                 </span>
               </label>
 
               <label class="toggle">
                 <input name="mode" type="radio" value="excel_prices">
                 <span>
-                  <strong>Prices search with Excel file</strong>
-                  <small>Compares PDF and Excel prices without placing links.</small>
+                  <strong>Проверка на цени с Excel</strong>
+                  <small>Сравнява цени от PDF и Excel без поставяне на линкове.</small>
                 </span>
               </label>
 
               <label class="toggle">
                 <input name="mode" type="radio" value="full_check">
                 <span>
-                  <strong>Link placement with Excel and website check</strong>
-                  <small>Places website/search links and compares PDF, Excel, and website prices.</small>
+                  <strong>Линкове с проверка от Excel и сайт</strong>
+                  <small>Поставя линкове и сравнява цени от PDF, Excel и сайта.</small>
                 </span>
               </label>
             </fieldset>
 
             <fieldset class="mode-group page-scope">
-              <legend>Pages to process</legend>
+              <legend>Страници за обработка</legend>
               <label class="toggle compact-toggle">
                 <input name="pageMode" type="radio" value="all" checked>
                 <span>
-                  <strong>Whole file</strong>
-                  <small>Processes every product page.</small>
+                  <strong>Целият файл</strong>
+                  <small>Обработва всички продуктови страници.</small>
                 </span>
               </label>
               <label class="toggle compact-toggle page-number-toggle">
                 <input name="pageMode" type="radio" value="single">
                 <span>
-                  <strong>One page</strong>
-                  <small>Only detects, links, and checks this page.</small>
-                  <input id="pageNumberInput" name="pageNumber" type="number" min="1" step="1" placeholder="Page number" disabled>
+                  <strong>Една страница</strong>
+                  <small>Обработва само избраната страница.</small>
+                  <input id="pageNumberInput" name="pageNumber" type="number" min="1" step="1" placeholder="Номер на страница" disabled>
                 </span>
               </label>
               <label class="toggle compact-toggle page-range-toggle">
                 <input name="pageMode" type="radio" value="range">
                 <span>
-                  <strong>Multiple pages</strong>
-                  <small>Processes a continuous page range.</small>
+                  <strong>Диапазон страници</strong>
+                  <small>Обработва последователен диапазон.</small>
                   <span class="page-range-inputs">
-                    <input id="pageStartInput" name="pageStart" type="number" min="1" step="1" placeholder="From" disabled>
-                    <span>to</span>
-                    <input id="pageEndInput" name="pageEnd" type="number" min="1" step="1" placeholder="To" disabled>
+                    <input id="pageStartInput" name="pageStart" type="number" min="1" step="1" placeholder="От" disabled>
+                    <span>до</span>
+                    <input id="pageEndInput" name="pageEnd" type="number" min="1" step="1" placeholder="До" disabled>
                   </span>
                 </span>
               </label>
@@ -107,57 +107,57 @@
             <label class="toggle">
               <input name="debugBoxes" type="checkbox">
               <span>
-                <strong>Draw debug boxes</strong>
-                <small>Useful when checking link area placement on a new brochure.</small>
+                <strong>Покажи помощни рамки</strong>
+                <small>Полезно при проверка на зоните за линкове в нова брошура.</small>
               </span>
             </label>
 
             <div class="numbers">
               <label>
-                <span>Min digits</span>
+                <span>Мин. цифри</span>
                 <input name="minDigits" type="number" min="5" max="12" value="5">
               </label>
               <label>
-                <span>Max digits</span>
+                <span>Макс. цифри</span>
                 <input name="maxDigits" type="number" min="5" max="12" value="12">
               </label>
               <label>
-                <span>Padding</span>
+                <span>Отстъп</span>
                 <input name="boxPadding" type="number" min="0" max="16" value="0">
               </label>
             </div>
           </div>
 
-          <button id="processButton" class="primary" type="submit">Process PDF</button>
+          <button id="processButton" class="primary" type="submit">Обработи PDF</button>
         </section>
 
         <section class="panel output-panel">
           <div class="output-head">
             <div>
-              <h2>Output</h2>
-              <p id="resultHint" class="muted">Results will appear after processing.</p>
+              <h2>Резултат</h2>
+              <p id="resultHint" class="muted">Резултатите ще се покажат след обработка.</p>
             </div>
           </div>
 
           <div id="progress" class="progress" hidden>
             <span></span>
-            <p>Processing PDF...</p>
+            <p>PDF файлът се обработва...</p>
           </div>
 
           <div id="summaryGrid" class="summary">
-            <div><strong>0</strong><span>SKUs</span></div>
-            <div><strong>0</strong><span>Variants</span></div>
-            <div><strong>0</strong><span>Links</span></div>
-            <div><strong>0</strong><span>Website diffs</span></div>
-            <div><strong>0</strong><span>Excel diffs</span></div>
-            <div><strong>0</strong><span>Triple diffs</span></div>
-            <div><strong>0</strong><span>Pages</span></div>
+            <div><strong>0</strong><span>Кодове</span></div>
+            <div><strong>0</strong><span>Варианти</span></div>
+            <div><strong>0</strong><span>Линкове</span></div>
+            <div><strong>0</strong><span>Разлики сайт</span></div>
+            <div><strong>0</strong><span>Разлики Excel</span></div>
+            <div><strong>0</strong><span>Тройни разлики</span></div>
+            <div><strong>0</strong><span>Страници</span></div>
           </div>
 
           <div id="downloads" class="downloads" hidden>
-            <button id="downloadPdf" type="button">Download PDF</button>
-            <button id="downloadExcel" type="button">Export Excel</button>
-            <button id="downloadJson" type="button">Download JSON</button>
+            <button id="downloadPdf" type="button">Изтегли PDF</button>
+            <button id="downloadExcel" type="button">Експорт Excel</button>
+            <button id="downloadJson" type="button">Изтегли JSON</button>
           </div>
 
           <div class="table-wrap">
@@ -180,9 +180,9 @@
                 <tr>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Page</span>
+                      <span class="th-label">Стр.</span>
                       <span class="filter-field">
-                        <input id="pageFilter" class="column-filter" data-query-key="page" type="search" placeholder="Page" autocomplete="off">
+                        <input id="pageFilter" class="column-filter" data-query-key="page" type="search" placeholder="Стр." autocomplete="off">
                       </span>
                     </div>
                   </th>
@@ -196,92 +196,92 @@
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Parent SKU</span>
+                      <span class="th-label">Родител</span>
                       <span class="filter-field">
-                        <input id="parentSkuFilter" class="column-filter" data-query-key="parent_sku" type="search" placeholder="Parent" autocomplete="off">
+                        <input id="parentSkuFilter" class="column-filter" data-query-key="parent_sku" type="search" placeholder="Родител" autocomplete="off">
                       </span>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Status</span>
+                      <span class="th-label">Статус</span>
                       <button id="statusFilterButton" class="filter-trigger" type="button" data-filter="status" aria-expanded="false">
-                        <span class="filter-value">All</span>
+                        <span class="filter-value">Всички</span>
                         <span class="filter-mark"></span>
                       </button>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Box</span>
+                      <span class="th-label">Тип</span>
                       <span class="filter-field">
-                        <input id="boxFilter" class="column-filter" data-query-key="box_type" type="search" placeholder="Box" autocomplete="off">
+                        <input id="boxFilter" class="column-filter" data-query-key="box_type" type="search" placeholder="Тип" autocomplete="off">
                       </span>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Brochure price</span>
+                      <span class="th-label">Цена PDF</span>
                       <span class="filter-field">
-                        <input id="brochureFilter" class="column-filter" data-query-key="brochure_price" type="search" placeholder="Price" autocomplete="off">
+                        <input id="brochureFilter" class="column-filter" data-query-key="brochure_price" type="search" placeholder="Цена" autocomplete="off">
                       </span>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Website price</span>
+                      <span class="th-label">Цена сайт</span>
                       <span class="filter-field">
-                        <input id="websiteFilter" class="column-filter" data-query-key="website_price" type="search" placeholder="Price" autocomplete="off">
+                        <input id="websiteFilter" class="column-filter" data-query-key="website_price" type="search" placeholder="Цена" autocomplete="off">
                       </span>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Excel price</span>
+                      <span class="th-label">Цена Excel</span>
                       <span class="filter-field">
-                        <input id="excelPriceFilter" class="column-filter" data-query-key="excel_price" type="search" placeholder="Price" autocomplete="off">
+                        <input id="excelPriceFilter" class="column-filter" data-query-key="excel_price" type="search" placeholder="Цена" autocomplete="off">
                       </span>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Website check</span>
+                      <span class="th-label">Проверка сайт</span>
                       <button id="priceFilterButton" class="filter-trigger" type="button" data-filter="price_status" aria-expanded="false">
-                        <span class="filter-value">All</span>
+                        <span class="filter-value">Всички</span>
                         <span class="filter-mark"></span>
                       </button>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Excel check</span>
+                      <span class="th-label">Проверка Excel</span>
                       <button id="excelFilterButton" class="filter-trigger" type="button" data-filter="excel_status" aria-expanded="false">
-                        <span class="filter-value">All</span>
+                        <span class="filter-value">Всички</span>
                         <span class="filter-mark"></span>
                       </button>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">Triple check</span>
+                      <span class="th-label">Тройна проверка</span>
                       <button id="tripleFilterButton" class="filter-trigger" type="button" data-filter="triple_status" aria-expanded="false">
-                        <span class="filter-value">All</span>
+                        <span class="filter-value">Всички</span>
                         <span class="filter-mark"></span>
                       </button>
                     </div>
                   </th>
                   <th>
                     <div class="th-stack">
-                      <span class="th-label">URL</span>
+                      <span class="th-label">Линк</span>
                       <span class="filter-field">
-                        <input id="urlFilter" class="column-filter" data-query-key="url" type="search" placeholder="URL" autocomplete="off">
+                        <input id="urlFilter" class="column-filter" data-query-key="url" type="search" placeholder="Линк" autocomplete="off">
                       </span>
                     </div>
                   </th>
                 </tr>
               </thead>
               <tbody id="resultsBody">
-                <tr class="empty"><td colspan="12">No file processed yet.</td></tr>
+                <tr class="empty"><td colspan="12">Все още няма обработен файл.</td></tr>
               </tbody>
             </table>
           </div>

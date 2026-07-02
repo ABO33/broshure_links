@@ -41,56 +41,59 @@ const tableState = {
 };
 
 const labels = {
-  mapped: "Mapped",
-  linked: "Linked",
-  search: "Search",
-  search_only: "Search only",
-  link_not_found: "Link not found",
-  price_only: "Price only",
-  repeating_item: "Repeating item",
-  table_header_error: "Table header error",
-  sku_illustration_error: "SKU illustration error",
-  grouped_search: "Grouped search",
-  group_title_missing: "Group title missing",
-  group_count_mismatch: "Group count mismatch",
-  group_count_unknown: "Group count unknown",
-  blocked: "Blocked",
-  unresolved: "Unresolved",
-  error: "Error",
-  match: "Match",
-  different: "Different",
-  no_url: "No URL",
-  no_brochure_price: "No brochure price",
-  brochure_price_not_defined: "Brochure price not defined",
-  no_website_price: "No website price",
-  no_excel_price: "No Excel price",
-  not_found: "Not found",
-  not_checked: "Not checked",
-  playwright_unavailable: "Browser unavailable",
-  website_price_found: "Website price found"
+  mapped: "Ръчно зададен",
+  linked: "Линк намерен",
+  search: "Търсене",
+  search_only: "Само търсене",
+  link_not_found: "Линк не е намерен",
+  price_only: "Само цена",
+  repeating_item: "Повтарящ се код",
+  table_header_error: "Грешка в таблица",
+  sku_illustration_error: "Грешка в група кодове",
+  grouped_search: "Групово търсене",
+  group_title_missing: "Липсва име за група",
+  group_count_mismatch: "Несъответствие в група",
+  group_count_unknown: "Непроверена група",
+  blocked: "Блокирано",
+  unresolved: "Неразрешено",
+  error: "Грешка",
+  match: "Съвпада",
+  different: "Различно",
+  no_url: "Няма линк",
+  no_brochure_price: "Няма цена в PDF",
+  brochure_price_not_defined: "Цена не е дефинирана",
+  no_website_price: "Няма цена от сайта",
+  no_excel_price: "Няма цена от Excel",
+  not_found: "Не е намерено",
+  not_checked: "Не е проверено",
+  playwright_unavailable: "Браузърът не е наличен",
+  website_price_found: "Цена от сайта е намерена",
+  item: "Артикул",
+  variant: "Вариант",
+  complex: "Комплексен"
 };
 
 const excelColumns = [
-  ["page", "Page"],
+  ["page", "Страница"],
   ["sku", "SKU"],
-  ["parent_sku", "Parent SKU"],
-  ["status", "Status"],
-  ["box_type", "Box"],
-  ["brochure_price", "Brochure price"],
-  ["website_price", "Website price"],
-  ["excel_price", "Excel price"],
-  ["price_status", "Website check"],
-  ["excel_status", "Excel check"],
-  ["triple_status", "Triple check"],
-  ["url", "URL"]
+  ["parent_sku", "Родител SKU"],
+  ["status", "Статус"],
+  ["box_type", "Тип"],
+  ["brochure_price", "Цена PDF"],
+  ["website_price", "Цена сайт"],
+  ["excel_price", "Цена Excel"],
+  ["price_status", "Проверка сайт"],
+  ["excel_status", "Проверка Excel"],
+  ["triple_status", "Тройна проверка"],
+  ["url", "Линк"]
 ];
 
 pdfInput.addEventListener("change", () => {
-  pdfLabel.textContent = pdfInput.files[0]?.name || "Choose brochure PDF";
+  pdfLabel.textContent = pdfInput.files[0]?.name || "Изберете PDF брошура";
 });
 
 excelInput.addEventListener("change", () => {
-  excelLabel.textContent = excelInput.files[0]?.name || "Choose price Excel";
+  excelLabel.textContent = excelInput.files[0]?.name || "Изберете Excel с цени";
 });
 
 modeInputs.forEach((input) => input.addEventListener("change", updateModeState));
@@ -115,12 +118,12 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!pdfInput.files[0]) return;
   if (modeNeedsExcel(getSelectedMode()) && !excelInput.files[0]) {
-    resultHint.textContent = "Upload an Excel .xlsx file for the selected price check mode.";
+    resultHint.textContent = "Качете Excel .xlsx файл за избрания режим на проверка.";
     excelInput.focus();
     return;
   }
   if (getSelectedPageMode() === "single" && !pageNumberInput.value) {
-    resultHint.textContent = "Enter the page number you want to process.";
+    resultHint.textContent = "Въведете номера на страницата за обработка.";
     pageNumberInput.focus();
     return;
   }
@@ -128,12 +131,12 @@ form.addEventListener("submit", async (event) => {
     const start = Number(pageStartInput.value);
     const end = Number(pageEndInput.value);
     if (!start || !end) {
-      resultHint.textContent = "Enter the first and last page you want to process.";
+      resultHint.textContent = "Въведете първа и последна страница за обработка.";
       (pageStartInput.value ? pageEndInput : pageStartInput).focus();
       return;
     }
     if (start > end) {
-      resultHint.textContent = "The first page in the range must be before or equal to the last page.";
+      resultHint.textContent = "Първата страница трябва да е преди или равна на последната.";
       pageStartInput.focus();
       return;
     }
@@ -150,7 +153,7 @@ form.addEventListener("submit", async (event) => {
       body: new FormData(form)
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Processing failed");
+    if (!response.ok) throw new Error(payload.error || "Обработката е неуспешна");
 
     lastResult = payload;
     resetTableState();
@@ -158,12 +161,12 @@ form.addEventListener("submit", async (event) => {
     renderRows();
     downloads.hidden = !payload.pdfBase64;
     resultHint.textContent = payload.summary.blockedLookups
-      ? "Some exact live lookups were blocked; search fallback links were used where available."
+      ? "Част от проверките в сайта бяха блокирани; използвани са линкове към търсене, когато е възможно."
       : completionMessage(payload.summary.mode);
   } catch (error) {
     lastResult = null;
     resultsBody.innerHTML = `<tr class="empty"><td colspan="12">${escapeHtml(error.message)}</td></tr>`;
-    resultHint.textContent = "Processing failed.";
+    resultHint.textContent = "Обработката е неуспешна.";
   } finally {
     setBusy(false);
   }
@@ -171,19 +174,19 @@ form.addEventListener("submit", async (event) => {
 
 document.querySelector("#downloadPdf").addEventListener("click", () => {
   if (!lastResult?.pdfBase64) return;
-  downloadBlob(base64ToBlob(lastResult.pdfBase64, "application/pdf"), lastResult.outputFileName || "linked-brochure.pdf");
+  downloadBlob(base64ToBlob(lastResult.pdfBase64, "application/pdf"), lastResult.outputFileName || "broshura-s-linkove.pdf");
 });
 
 document.querySelector("#downloadExcel").addEventListener("click", () => {
   if (!lastResult?.rows) return;
   const rows = getVisibleRows();
-  downloadBlob(toXlsxBlob(rows), "brochure-link-report.xlsx");
+  downloadBlob(toXlsxBlob(rows), "spravka-broshura-linkove.xlsx");
 });
 
 document.querySelector("#downloadJson").addEventListener("click", () => {
   if (!lastResult) return;
   const json = JSON.stringify({ summary: lastResult.summary, rows: lastResult.rows }, null, 2);
-  downloadBlob(new Blob([json], { type: "application/json" }), "brochure-link-report.json");
+  downloadBlob(new Blob([json], { type: "application/json" }), "spravka-broshura-linkove.json");
 });
 
 Object.entries(filterButtons).forEach(([key, button]) => {
@@ -273,7 +276,7 @@ function resetTableState() {
 
 function setBusy(isBusy) {
   processButton.disabled = isBusy;
-  processButton.textContent = isBusy ? "Processing..." : "Process PDF";
+  processButton.textContent = isBusy ? "Обработка..." : "Обработи PDF";
   progress.hidden = !isBusy;
 }
 
@@ -307,28 +310,28 @@ function modeNeedsExcel(mode) {
 }
 
 function processingMessage(mode) {
-  if (mode === "website_links_prices") return "Reading the PDF, checking Praktis links and euro prices...";
-  if (mode === "excel_prices") return "Reading the PDF and comparing brochure prices with Excel...";
-  if (mode === "full_check") return "Reading the PDF, checking Praktis links, and comparing PDF, Excel, and website prices...";
-  return "Reading text, detecting SKU boxes, and writing SKU search links...";
+  if (mode === "website_links_prices") return "PDF файлът се чете, проверяват се линкове и евро цени в Praktis...";
+  if (mode === "excel_prices") return "PDF файлът се чете и цените се сравняват с Excel...";
+  if (mode === "full_check") return "PDF файлът се чете, проверяват се линкове и се сравняват цени от PDF, Excel и сайта...";
+  return "Текстът се чете, откриват се кодове и се поставят линкове към търсене...";
 }
 
 function completionMessage(mode) {
-  if (mode === "excel_prices") return "Excel price report is ready.";
-  if (mode === "full_check") return "Linked PDF and triple price report are ready.";
-  if (mode === "website_links_prices") return "Linked PDF and website price report are ready.";
-  return "Search-link PDF is ready.";
+  if (mode === "excel_prices") return "Справката с цени от Excel е готова.";
+  if (mode === "full_check") return "PDF файлът с линкове и тройната проверка са готови.";
+  if (mode === "website_links_prices") return "PDF файлът с линкове и проверката със сайта са готови.";
+  return "PDF файлът с линкове към търсене е готов.";
 }
 
 function renderSummary(summary) {
   const values = [
-    [summary.uniqueSkus, "SKUs"],
-    [summary.variantRows ?? 0, "Variants"],
-    [summary.linkedAnnotations, "Links"],
-    [summary.priceDifferent ?? 0, "Website diffs"],
-    [summary.excelDifferent ?? 0, "Excel diffs"],
-    [summary.tripleDifferent ?? 0, "Triple diffs"],
-    [summary.pages, "Pages"]
+    [summary.uniqueSkus, "Кодове"],
+    [summary.variantRows ?? 0, "Варианти"],
+    [summary.linkedAnnotations, "Линкове"],
+    [summary.priceDifferent ?? 0, "Разлики сайт"],
+    [summary.excelDifferent ?? 0, "Разлики Excel"],
+    [summary.tripleDifferent ?? 0, "Тройни разлики"],
+    [summary.pages, "Страници"]
   ];
   summaryGrid.innerHTML = values
     .map(([value, label]) => `<div><strong>${value}</strong><span>${label}</span></div>`)
@@ -340,17 +343,17 @@ function renderRows() {
 
   const rows = getVisibleRows();
   if (!lastResult) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">No file processed yet.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">Все още няма обработен файл.</td></tr>`;
     return;
   }
 
   if (!lastResult?.rows?.length) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">No readable SKU codes were found.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">Не са намерени четими кодове.</td></tr>`;
     return;
   }
 
   if (!rows.length) {
-    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">No rows match the current filters.</td></tr>`;
+    resultsBody.innerHTML = `<tr class="empty"><td colspan="12">Няма редове, които отговарят на текущите филтри.</td></tr>`;
     return;
   }
 
@@ -362,9 +365,10 @@ function rowToHtml(row) {
   const priceStatus = getChoiceStatusValue(row, "price_status");
   const excelStatus = getChoiceStatusValue(row, "excel_status");
   const tripleStatus = getChoiceStatusValue(row, "triple_status");
+  const displayMessage = translateMessage(row.message || "");
   const url = row.url
     ? `<a href="${escapeAttr(row.url)}" target="_blank" rel="noreferrer">${escapeHtml(row.title || row.url)}</a>`
-    : `<span>${escapeHtml(row.message || "No link")}</span>`;
+    : `<span>${escapeHtml(displayMessage || "Няма линк")}</span>`;
 
   return `
     <tr>
@@ -372,13 +376,13 @@ function rowToHtml(row) {
       <td>${escapeHtml(row.sku)}</td>
       <td>${escapeHtml(row.parent_sku || "")}</td>
       <td>${badgeHtml(status)}</td>
-      <td>${escapeHtml(row.box_type)}</td>
+      <td>${escapeHtml(labels[row.box_type] || row.box_type)}</td>
       <td>${formatBrochurePrice(row)}</td>
       <td>${formatPrice(row.website_price)}</td>
       <td>${formatPrice(row.excel_price)}</td>
-      <td title="${escapeAttr(row.price_message || "")}">${priceStatus === "not_checked" ? `<span class="muted-cell">Not checked</span>` : badgeHtml(priceStatus)}</td>
-      <td title="${escapeAttr(row.excel_message || "")}">${excelStatus === "not_checked" ? `<span class="muted-cell">Not checked</span>` : badgeHtml(excelStatus)}</td>
-      <td title="${escapeAttr(row.triple_message || "")}">${tripleStatus === "not_checked" ? `<span class="muted-cell">Not checked</span>` : badgeHtml(tripleStatus)}</td>
+      <td title="${escapeAttr(translateMessage(row.price_message || ""))}">${priceStatus === "not_checked" ? `<span class="muted-cell">Не е проверено</span>` : badgeHtml(priceStatus)}</td>
+      <td title="${escapeAttr(translateMessage(row.excel_message || ""))}">${excelStatus === "not_checked" ? `<span class="muted-cell">Не е проверено</span>` : badgeHtml(excelStatus)}</td>
+      <td title="${escapeAttr(translateMessage(row.triple_message || ""))}">${tripleStatus === "not_checked" ? `<span class="muted-cell">Не е проверено</span>` : badgeHtml(tripleStatus)}</td>
       <td class="url-cell">${url}</td>
     </tr>
   `;
@@ -456,13 +460,13 @@ function renderColumnMenu(key, keepFocus = false) {
 
   columnFilterMenu.innerHTML = `
     <div class="menu-sort">
-      <button type="button" data-sort="asc" class="${sortActive === "asc" ? "active" : ""}">Sort A to Z</button>
-      <button type="button" data-sort="desc" class="${sortActive === "desc" ? "active" : ""}">Sort Z to A</button>
+      <button type="button" data-sort="asc" class="${sortActive === "asc" ? "active" : ""}">Сортирай А-Я</button>
+      <button type="button" data-sort="desc" class="${sortActive === "desc" ? "active" : ""}">Сортирай Я-А</button>
     </div>
-    <input class="filter-search" type="search" placeholder="Search" value="${escapeAttr(tableState.menuSearch[key])}" autocomplete="off">
+    <input class="filter-search" type="search" placeholder="Търсене" value="${escapeAttr(tableState.menuSearch[key])}" autocomplete="off">
     <label class="check-row select-all">
       <input type="checkbox" data-action="select-visible" ${allVisibleSelected ? "checked" : ""}>
-      <span>(Select All)</span>
+      <span>(Избери всички)</span>
     </label>
     <div class="filter-options">
       ${
@@ -477,12 +481,12 @@ function renderColumnMenu(key, keepFocus = false) {
                 `
               )
               .join("")
-          : `<div class="filter-empty">No values</div>`
+          : `<div class="filter-empty">Няма стойности</div>`
       }
     </div>
     <div class="menu-actions">
-      <button type="button" data-action="clear-filter">Clear filter</button>
-      <button type="button" data-action="close-filter">Close</button>
+      <button type="button" data-action="clear-filter">Изчисти филтъра</button>
+      <button type="button" data-action="close-filter">Затвори</button>
     </div>
   `;
 
@@ -530,7 +534,7 @@ function getChoiceStatusValue(row, key) {
 }
 
 function getFilterLabel(key, value) {
-  return labels[value] || value || (key === "price_status" ? "Not checked" : "Blank");
+  return labels[value] || value || (key === "price_status" ? "Не е проверено" : "Празно");
 }
 
 function updateFilterButtons() {
@@ -543,8 +547,8 @@ function updateFilterButtons() {
     const mark = button.querySelector(".filter-mark");
     const marks = [];
 
-    value.textContent = filterActive ? `${selected.size} selected` : "All";
-    if (sortActive) marks.push(tableState.sort.direction === "asc" ? "A-Z" : "Z-A");
+    value.textContent = filterActive ? `${selected.size} избрани` : "Всички";
+    if (sortActive) marks.push(tableState.sort.direction === "asc" ? "А-Я" : "Я-А");
 
     button.classList.toggle("active", filterActive || sortActive);
     mark.textContent = marks.join(" ");
@@ -553,6 +557,36 @@ function updateFilterButtons() {
 
 function badgeHtml(value) {
   return `<span class="badge ${escapeAttr(value)}">${escapeHtml(labels[value] || value)}</span>`;
+}
+
+function translateMessage(message) {
+  const text = String(message || "");
+  if (!text) return "";
+  const exact = {
+    "No mapping entry and live lookup is off.": "Няма ръчно зададен линк и директното търсене е изключено.",
+    "Excel price check mode does not place links.": "Режимът за проверка с Excel не поставя линкове.",
+    "No brochure price was detected.": "Не е открита цена в PDF.",
+    "No website price was available.": "Няма налична цена от сайта.",
+    "No euro website price was found by the Praktis browser lookup.": "Браузърът не откри евро цена в Praktis.",
+    "Brochure and website prices match.": "Цените от PDF и сайта съвпадат.",
+    "Brochure and website prices are different.": "Цените от PDF и сайта са различни.",
+    "Brochure and Excel prices match.": "Цените от PDF и Excel съвпадат.",
+    "Brochure and Excel prices are different.": "Цените от PDF и Excel са различни.",
+    "Brochure, website, and Excel prices match.": "Цените от PDF, сайта и Excel съвпадат.",
+    "At least one of brochure, website, or Excel price is different.": "Поне една от цените в PDF, сайта или Excel е различна.",
+    "Triple price check was not selected.": "Тройната проверка не е избрана.",
+    "Grouped product-name link was not created because product titles were not available.": "Групов линк не е създаден, защото липсват имена на продукти.",
+    "Grouped product-name link could not be built from the product titles.": "Груповият линк не може да бъде създаден от имената на продуктите.",
+    "Grouped Praktis search count could not be checked.": "Броят резултати в груповото търсене не може да бъде проверен."
+  };
+  if (exact[text]) return exact[text];
+  return text
+    .replace("No Excel price was found for this SKU.", "Няма цена от Excel за този код.")
+    .replace("No exact Praktis result or euro price was found; SKU search link was used.", "Не е намерен точен резултат или евро цена в Praktis; използван е линк към търсене по код.")
+    .replace("Praktis/Cloudflare blocked the browser price lookup.", "Praktis/Cloudflare блокира проверката през браузъра.")
+    .replace("Praktis/Cloudflare blocked grouped search validation.", "Praktis/Cloudflare блокира проверката на груповото търсене.")
+    .replace("Brochure shows a 'from' price; exact SKU price is not defined.", "В PDF има цена „от“; точната цена за този код не е дефинирана.")
+    .replace("Brochure shows a 'from' price; only the lowest priced SKU in this item box is compared.", "В PDF има цена „от“; сравнява се само кодът с най-ниската цена в това поле.");
 }
 
 function toXlsxBlob(rows) {
@@ -624,7 +658,7 @@ function excelCellForColumn(key, columnIndex, rowNumber, row) {
   const column = columnName(columnIndex);
   if (key === "page") return numberCell(column, rowNumber, row.page, 2);
   if (key === "brochure_price" && row.brochure_price_not_defined) {
-    return cell(column, rowNumber, row.brochure_price_text || "Not defined", 7);
+    return cell(column, rowNumber, row.brochure_price_text || "Не е дефинирана", 7);
   }
   if (["brochure_price", "website_price", "excel_price"].includes(key)) {
     return numberCell(column, rowNumber, row[key], 3);
@@ -638,13 +672,14 @@ function excelCellForColumn(key, columnIndex, rowNumber, row) {
     return cell(
       column,
       rowNumber,
-      status === "not_checked" ? "Not checked" : labels[status] || status,
+      status === "not_checked" ? "Не е проверено" : labels[status] || status,
       status === "not_checked" ? 7 : excelStatusStyle(status)
     );
   }
   if (key === "url") {
-    return cell(column, rowNumber, row.url ? row.title || row.url : row.message || "No link", row.url ? 8 : 7);
+    return cell(column, rowNumber, row.url ? row.title || row.url : translateMessage(row.message || "") || "Няма линк", row.url ? 8 : 7);
   }
+  if (key === "box_type") return cell(column, rowNumber, labels[row[key]] || row[key], 2);
   return cell(column, rowNumber, row[key], 2);
 }
 
@@ -699,7 +734,7 @@ function rootRelsXml() {
 function appPropsXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
-  <Application>Praktis Brochure Linker</Application>
+  <Application>Линкер за брошури Praktis</Application>
 </Properties>`;
 }
 
@@ -707,9 +742,9 @@ function corePropsXml() {
   const created = new Date().toISOString();
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <dc:title>Brochure link report</dc:title>
-  <dc:creator>Praktis Brochure Linker</dc:creator>
-  <cp:lastModifiedBy>Praktis Brochure Linker</cp:lastModifiedBy>
+  <dc:title>Справка за линкове в брошура</dc:title>
+  <dc:creator>Линкер за брошури Praktis</dc:creator>
+  <cp:lastModifiedBy>Линкер за брошури Praktis</cp:lastModifiedBy>
   <dcterms:created xsi:type="dcterms:W3CDTF">${created}</dcterms:created>
   <dcterms:modified xsi:type="dcterms:W3CDTF">${created}</dcterms:modified>
 </cp:coreProperties>`;
@@ -718,7 +753,7 @@ function corePropsXml() {
 function workbookXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="Report" sheetId="1" r:id="rId1"/></sheets>
+  <sheets><sheet name="Справка" sheetId="1" r:id="rId1"/></sheets>
 </workbook>`;
 }
 
@@ -929,7 +964,7 @@ function formatPrice(value) {
 }
 
 function formatBrochurePrice(row) {
-  if (row?.brochure_price_not_defined) return row.brochure_price_text || "Not defined";
+  if (row?.brochure_price_not_defined) return row.brochure_price_text || "Не е дефинирана";
   return formatPrice(row?.brochure_price);
 }
 

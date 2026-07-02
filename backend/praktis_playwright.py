@@ -204,20 +204,21 @@ async def _launch_browser_context(p):
 
 
 async def _launch_persistent_context(p, user_data_dir: str):
-    return await p.chromium.launch_persistent_context(
-        user_data_dir=user_data_dir,
-        channel=CHROME_CHANNEL,
-        headless=HEADLESS,
-        viewport={"width": 1366, "height": 768},
-        locale="bg-BG",
-        timezone_id="Europe/Sofia",
-        user_agent=USER_AGENT,
-        extra_http_headers={
+    options = {
+        "headless": HEADLESS,
+        "viewport": {"width": 1366, "height": 768},
+        "locale": "bg-BG",
+        "timezone_id": "Europe/Sofia",
+        "user_agent": USER_AGENT,
+        "extra_http_headers": {
             "Accept-Language": "bg-BG,bg;q=0.9,en-US;q=0.8,en;q=0.7",
             "Referer": BASE_URL + "/",
         },
-        args=["--disable-blink-features=AutomationControlled"],
-    )
+        "args": ["--disable-blink-features=AutomationControlled"],
+    }
+    if CHROME_CHANNEL:
+        options["channel"] = CHROME_CHANNEL
+    return await p.chromium.launch_persistent_context(user_data_dir=user_data_dir, **options)
 
 
 async def _warm_session(context) -> None:
