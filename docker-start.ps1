@@ -24,9 +24,42 @@ if (-not $dockerHostIp) {
 }
 
 $env:PRAKTIS_CDP_URL = "http://${dockerHostIp}:9222"
-@(
-  "PRAKTIS_CDP_URL=$env:PRAKTIS_CDP_URL"
-) | Set-Content -LiteralPath (Join-Path $scriptDir ".env") -Encoding ASCII
+$envPath = Join-Path $scriptDir ".env"
+$envLines = @()
+if (Test-Path -LiteralPath $envPath) {
+  $envLines = @(Get-Content -LiteralPath $envPath)
+}
+
+$updated = $false
+$envLines = @(
+  foreach ($line in $envLines) {
+    if ($line -match "^\s*PRAKTIS_CDP_URL\s*=") {
+      "PRAKTIS_CDP_URL=$env:PRAKTIS_CDP_URL"
+      $updated = $true
+    } else {
+      $line
+    }
+  }
+)
+if (-not $updated) {
+  $envLines += "PRAKTIS_CDP_URL=$env:PRAKTIS_CDP_URL"
+}
+if (-not ($envLines -match "^\s*DISCORD_WEBHOOK_URL\s*=")) {
+  $envLines += "DISCORD_WEBHOOK_URL="
+}
+if (-not ($envLines -match "^\s*DISCORD_INFO_WEBHOOK_URL\s*=")) {
+  $envLines += "DISCORD_INFO_WEBHOOK_URL="
+}
+if (-not ($envLines -match "^\s*DISCORD_ERROR_WEBHOOK_URL\s*=")) {
+  $envLines += "DISCORD_ERROR_WEBHOOK_URL="
+}
+if (-not ($envLines -match "^\s*DISCORD_ERROR_LEVEL\s*=")) {
+  $envLines += "DISCORD_ERROR_LEVEL=WARNING"
+}
+if (-not ($envLines -match "^\s*DISCORD_LOG_LEVEL\s*=")) {
+  $envLines += "DISCORD_LOG_LEVEL=ERROR"
+}
+$envLines | Set-Content -LiteralPath $envPath -Encoding ASCII
 
 Write-Host "Using Chrome DevTools endpoint for Docker: $env:PRAKTIS_CDP_URL"
 

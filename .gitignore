@@ -5,6 +5,7 @@ __pycache__/
 data/link-cache.json
 output/
 tmp/
+logs/
 .praktis-browser-profile/
 .env
 *.log

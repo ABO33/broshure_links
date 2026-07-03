@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
 import os
+from pathlib import Path
 import sys
+
+from .discord_notifier import DiscordLogHandler
 
 
 LEVEL_COLORS = {
@@ -33,22 +37,78 @@ def configure_logging() -> None:
     level_name = os.environ.get("BROCHURE_LOG_LEVEL", "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
     root = logging.getLogger()
+    console_formatter = ColorFormatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    plain_formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     if root.handlers:
         root.setLevel(level)
         for handler in root.handlers:
-            handler.setFormatter(
-                ColorFormatter(
-                    "%(asctime)s %(levelname)s [%(name)s] %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                )
-            )
+            if getattr(handler, "_brochure_file_handler", False):
+                handler.setLevel(level)
+            if getattr(handler, "_brochure_discord_handler", False):
+                discord_level_name = os.environ.get("DISCORD_LOG_LEVEL", "ERROR").upper()
+                handler.setLevel(getattr(logging, discord_level_name, logging.ERROR))
+            if getattr(handler, "_brochure_file_handler", False) or getattr(handler, "_brochure_discord_handler", False):
+                handler.setFormatter(plain_formatter)
+            else:
+                handler.setFormatter(console_formatter)
+        _ensure_file_handler(root, level)
+        _ensure_discord_handler(root)
         return
     handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(console_formatter)
+    root.setLevel(level)
+    root.addHandler(handler)
+    _ensure_file_handler(root, level)
+    _ensure_discord_handler(root)
+
+
+def _ensure_file_handler(root: logging.Logger, level: int) -> None:
+    log_dir = os.environ.get("BROCHURE_LOG_DIR", "").strip()
+    if not log_dir:
+        return
+    if any(getattr(handler, "_brochure_file_handler", False) for handler in root.handlers):
+        return
+
+    Path(log_dir).mkdir(parents=True, exist_ok=True)
+    log_path = Path(log_dir) / "brochure-linker.log"
+    max_bytes = int(os.environ.get("BROCHURE_LOG_MAX_BYTES", str(10 * 1024 * 1024)))
+    backups = int(os.environ.get("BROCHURE_LOG_BACKUPS", "5"))
+    handler = RotatingFileHandler(log_path, maxBytes=max_bytes, backupCount=backups, encoding="utf-8")
+    handler.setLevel(level)
     handler.setFormatter(
-        ColorFormatter(
+        logging.Formatter(
             "%(asctime)s %(levelname)s [%(name)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     )
-    root.setLevel(level)
+    handler._brochure_file_handler = True
+    root.addHandler(handler)
+
+
+def _ensure_discord_handler(root: logging.Logger) -> None:
+    if not any(
+        os.environ.get(name, "").strip()
+        for name in ("DISCORD_WEBHOOK_URL", "DISCORD_INFO_WEBHOOK_URL", "DISCORD_ERROR_WEBHOOK_URL")
+    ):
+        return
+    if any(getattr(handler, "_brochure_discord_handler", False) for handler in root.handlers):
+        return
+
+    level_name = os.environ.get("DISCORD_LOG_LEVEL", "ERROR").upper()
+    level = getattr(logging, level_name, logging.ERROR)
+    handler = DiscordLogHandler()
+    handler.setLevel(level)
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s %(levelname)s [%(name)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    handler._brochure_discord_handler = True
     root.addHandler(handler)

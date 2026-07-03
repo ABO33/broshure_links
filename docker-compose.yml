@@ -9,12 +9,38 @@ services:
     environment:
       BROCHURE_HOST: "0.0.0.0"
       BROCHURE_PORT: "5174"
+      BROCHURE_LOG_DIR: "/app/logs"
+      BROCHURE_HEALTH_INTERVAL_SECONDS: "${BROCHURE_HEALTH_INTERVAL_SECONDS:-60}"
+      BROCHURE_HEALTH_REMINDER_SECONDS: "${BROCHURE_HEALTH_REMINDER_SECONDS:-1800}"
+      BROCHURE_HEALTH_PRAKTIS_URL: "${BROCHURE_HEALTH_PRAKTIS_URL:-https://praktis.bg/}"
+      BROCHURE_MIN_FREE_DISK_MB: "${BROCHURE_MIN_FREE_DISK_MB:-512}"
+      BROCHURE_SLOW_SECONDS: "${BROCHURE_SLOW_SECONDS:-600}"
+      DISCORD_WEBHOOK_URL: "${DISCORD_WEBHOOK_URL:-}"
+      DISCORD_INFO_WEBHOOK_URL: "${DISCORD_INFO_WEBHOOK_URL:-}"
+      DISCORD_ERROR_WEBHOOK_URL: "${DISCORD_ERROR_WEBHOOK_URL:-}"
+      DISCORD_ERROR_LEVEL: "${DISCORD_ERROR_LEVEL:-WARNING}"
+      DISCORD_LOG_LEVEL: "${DISCORD_LOG_LEVEL:-ERROR}"
+      DISCORD_APP_NAME: "${DISCORD_APP_NAME:-Praktis Brochure Linker}"
+      DISCORD_PROCESS_NOTIFICATIONS: "${DISCORD_PROCESS_NOTIFICATIONS:-1}"
+      DISCORD_STARTUP_NOTIFICATIONS: "${DISCORD_STARTUP_NOTIFICATIONS:-1}"
       PRAKTIS_HEADLESS: "1"
       PRAKTIS_CHANNEL: ""
       PRAKTIS_CDP_URL: "${PRAKTIS_CDP_URL:-http://host.docker.internal:9222}"
       PRAKTIS_PROFILE: "/app/.praktis-browser-profile"
     volumes:
+      - ./logs:/app/logs
       - praktis-browser-profile:/app/.praktis-browser-profile
+
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    container_name: praktis-uptime-kuma
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
+    volumes:
+      - uptime-kuma-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
 volumes:
   praktis-browser-profile:
+  uptime-kuma-data:

@@ -8,10 +8,21 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
+import time
 from urllib.parse import unquote, urlparse
+from uuid import uuid4
 
 from .linker import process_brochure
 from .logging_config import configure_logging
+from .observability import (
+    deep_health,
+    local_health,
+    metrics_snapshot,
+    record_process_failed,
+    record_process_finished,
+    record_process_started,
+    start_health_monitor,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +36,14 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
-            self.send_json({"ok": True, "backend": "python"})
+            self.send_json(local_health())
+            return
+        if parsed.path == "/api/health/deep":
+            health = deep_health()
+            self.send_json(health, status=200 if health.get("ok") else 503)
+            return
+        if parsed.path == "/api/metrics":
+            self.send_json(metrics_snapshot())
             return
 
         self.serve_static(parsed.path)
@@ -36,6 +54,9 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "Not found"}, status=404)
             return
 
+        request_id = uuid4().hex[:10]
+        started = time.monotonic()
+        meta: dict = {"client": self.client_address[0] if self.client_address else ""}
         try:
             fields, files = self.parse_multipart()
             pdf = files.get("pdf")
@@ -43,8 +64,19 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Upload a PDF brochure first."}, status=400)
                 return
 
+            meta.update(
+                {
+                    "file": pdf["filename"],
+                    "size_bytes": len(pdf["data"]),
+                    "mode": fields.get("mode", ""),
+                    "page_mode": fields.get("pageMode", "all"),
+                }
+            )
+            record_process_started(request_id, meta)
             logger.info(
-                "Process request started: pdf=%s size=%s mode=%s pageMode=%s",
+                "Process request started: request=%s client=%s pdf=%s size=%s mode=%s pageMode=%s",
+                request_id,
+                meta["client"],
                 pdf["filename"],
                 len(pdf["data"]),
                 fields.get("mode", ""),
@@ -72,15 +104,21 @@ class AppHandler(BaseHTTPRequestHandler):
                     "boxPadding": fields.get("boxPadding", "0"),
                 },
             )
+            duration = time.monotonic() - started
+            record_process_finished(request_id, meta, result, duration)
             logger.info(
-                "Process request finished: rows=%s links=%s pages=%s",
+                "Process request finished: request=%s duration=%.2fs rows=%s links=%s pages=%s",
+                request_id,
+                duration,
                 len(result.get("rows") or []),
                 result.get("summary", {}).get("linkedAnnotations"),
                 result.get("summary", {}).get("pages"),
             )
             self.send_json(result)
         except Exception as exc:
-            logger.exception("Process request failed")
+            duration = time.monotonic() - started
+            record_process_failed(request_id, meta, exc, duration)
+            logger.exception("Process request failed: request=%s duration=%.2fs", request_id, duration)
             self.send_json({"error": str(exc)}, status=500)
 
     def parse_multipart(self):
@@ -141,6 +179,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
 def run(host: str | None = None, port: int | None = None):
     configure_logging()
+    start_health_monitor()
     host = host or os.environ.get("BROCHURE_HOST", "0.0.0.0")
     port = port or int(os.environ.get("BROCHURE_PORT", "5174"))
     server = ThreadingHTTPServer((host, port), AppHandler)
