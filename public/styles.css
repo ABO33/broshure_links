@@ -697,6 +697,7 @@ tbody tr:last-child td {
 .badge.group_count_unknown,
 .badge.no_url,
 .badge.no_brochure_price,
+.badge.brochure_price_missing,
 .badge.brochure_price_not_defined,
 .badge.no_website_price,
 .badge.no_excel_price,

@@ -72,6 +72,7 @@ HEADER_PRICE_GROUP_GAP = 68.0
 BGN_PER_EUR = 1.95583
 MAX_SHORTHAND_RANGE_ITEMS = 60
 UNDEFINED_BROCHURE_PRICE_TEXT = "Not defined"
+MISSING_BROCHURE_PRICE_TEXT = "?"
 logger = logging.getLogger(__name__)
 
 
@@ -480,11 +481,12 @@ def expand_header_shorthand_groups(
         if switched_parent:
             adjust_item_box_to_expression(page, item, expression)
         existing = {item["sku"]}
-        variant_message = (
-            "Header shorthand SKU; brochure shows a 'from' price so exact brochure price is not defined."
-            if item.get("brochure_price_from_marker") or item.get("brochure_price_not_defined")
-            else "Header shorthand SKU; brochure price is the displayed item price."
-        )
+        if is_missing_brochure_price_detection(item):
+            variant_message = "Header shorthand SKU; brochure price is missing."
+        elif item.get("brochure_price_from_marker") or item.get("brochure_price_not_defined"):
+            variant_message = "Header shorthand SKU; brochure shows a 'from' price so exact brochure price is not defined."
+        else:
+            variant_message = "Header shorthand SKU; brochure price is the displayed item price."
         for sku in skus:
             if sku in existing:
                 continue
@@ -566,14 +568,24 @@ def shorthand_variant_detection(
     message: str,
 ) -> dict:
     box = dict(source["box"])
-    price_not_defined = bool(source.get("brochure_price_not_defined") or source.get("brochure_price_from_marker"))
+    price_missing = is_missing_brochure_price_text(price_text) or is_missing_brochure_price_detection(source)
+    price_not_defined = bool(
+        price_missing or source.get("brochure_price_not_defined") or source.get("brochure_price_from_marker")
+    )
+    display_price_text = (
+        MISSING_BROCHURE_PRICE_TEXT
+        if price_missing
+        else UNDEFINED_BROCHURE_PRICE_TEXT
+        if price_not_defined
+        else price_text
+    )
     return _detection(
         page,
         sku,
         "variant",
         box,
         0.72,
-        UNDEFINED_BROCHURE_PRICE_TEXT if price_not_defined else price_text,
+        display_price_text,
         None if price_not_defined else price,
         linkable=False,
         status="",
@@ -1166,6 +1178,7 @@ def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padd
                     0.88,
                     brochure_price_text,
                     brochure_price,
+                    brochure_price_not_defined=is_missing_brochure_price_text(brochure_price_text),
                     brochure_price_from_marker=brochure_price_from_marker,
                 )
             )
@@ -1259,6 +1272,7 @@ def detect_variant_table_rows(
                 linkable=False,
                 status="table_header_error" if table_issue else "",
                 message=table_issue,
+                brochure_price_not_defined=is_missing_brochure_price_text(chosen[3]),
             )
         )
 
@@ -1270,6 +1284,10 @@ def table_price_candidates(line: list[Word], left: float, right: float) -> list[
     tokens = normalized_table_price_tokens([word for word in line if word.x0 > left and word.x0 < right])
 
     for word in tokens:
+        if is_missing_brochure_price_text(word.text):
+            candidates.append((word.x0, word.x1, None, MISSING_BROCHURE_PRICE_TEXT))
+            continue
+
         price = parse_table_price_word(word.text)
         if price is not None:
             candidates.append((word.x0, word.x1, price, word.text))
@@ -1444,7 +1462,12 @@ def table_price_issue(
         if second_candidates:
             leva_candidate = sorted(second_candidates, key=lambda item: item[0])[0]
 
-    if leva_candidate and not bgn_matches_euro(euro_candidate[2], leva_candidate[2]):
+    if (
+        leva_candidate
+        and euro_candidate[2] is not None
+        and leva_candidate[2] is not None
+        and not bgn_matches_euro(euro_candidate[2], leva_candidate[2])
+    ):
         issues.append(
             f"Table leva/euro conversion mismatch: {leva_candidate[2]:.2f} / {euro_candidate[2]:.2f} is not {BGN_PER_EUR:.5f}."
         )
@@ -1610,8 +1633,9 @@ def detect_header_driven_boxes(
                 "item",
                 box,
                 0.94,
-                price_text,
+                brochure_price_display_text(price_text),
                 brochure_price_to_decimal(price_text),
+                brochure_price_not_defined=is_missing_brochure_price_text(price_text),
                 brochure_price_from_marker=price_from_marker,
             )
         )
@@ -1695,7 +1719,7 @@ def is_sku_range_continuation(page: PageText, word: Word, row: list[Word]) -> bo
 
 
 def is_header_price_word(word: Word, sku_word: Word, right_edge: float) -> bool:
-    if not is_ascii_digits(word.text):
+    if not (is_ascii_digits(word.text) or is_missing_brochure_price_text(word.text)):
         return False
     if not 3 <= len(word.text) <= 6:
         return False
@@ -1939,7 +1963,7 @@ def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str,
     candidates: list[Word] = []
 
     for word in page.words:
-        if not is_ascii_digits(word.text):
+        if not (is_ascii_digits(word.text) or is_missing_brochure_price_text(word.text)):
             continue
         if not 3 <= len(word.text) <= 6:
             continue
@@ -1958,7 +1982,7 @@ def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str,
     candidates.sort(key=lambda item: (abs(item.top - sku_word.top), -item.height))
     price_word = candidates[0]
     raw = price_word.text
-    return raw, brochure_price_to_decimal(raw), has_from_price_marker(page, box, price_word)
+    return brochure_price_display_text(raw), brochure_price_to_decimal(raw), has_from_price_marker(page, box, price_word)
 
 
 def has_from_price_marker(page: PageText, box: dict, price_word: Word) -> bool:
@@ -2032,6 +2056,8 @@ def find_footer_top(page) -> float | None:
 
 
 def brochure_price_to_decimal(raw: str) -> float | None:
+    if is_missing_brochure_price_text(raw):
+        return None
     if not is_ascii_digits(raw):
         return None
     return round(int(raw) / 100, 2)
@@ -2043,6 +2069,15 @@ def parse_table_price_word(raw: str) -> float | None:
     if not match:
         return None
     return round(float(match.group(1)) + int(match.group(2).ljust(2, "0")) / 100, 2)
+
+
+def is_missing_brochure_price_text(raw: str) -> bool:
+    text = str(raw or "").replace("\xa0", "").replace(" ", "").strip()
+    return bool(re.fullmatch(r"\?+(?:[,.]?\?*0*)?", text))
+
+
+def brochure_price_display_text(raw: str) -> str:
+    return MISSING_BROCHURE_PRICE_TEXT if is_missing_brochure_price_text(raw) else str(raw or "")
 
 
 def attach_price_comparisons(detections: list[dict], resolved: dict[str, dict]) -> None:
@@ -2077,8 +2112,8 @@ def attach_price_comparisons(detections: list[dict], resolved: dict[str, dict]) 
         brochure_price, not_defined = comparison_brochure_price(item, "website_from_price_candidate")
         website_price = item.get("website_price")
         if not_defined:
-            item["price_status"] = "brochure_price_not_defined"
-            item["price_message"] = from_price_not_defined_message(item)
+            item["price_status"] = undefined_brochure_price_status(item)
+            item["price_message"] = undefined_brochure_price_message(item)
         elif brochure_price is None:
             item["price_status"] = "no_brochure_price"
             item["price_message"] = "No brochure price was detected."
@@ -2109,8 +2144,8 @@ def attach_excel_comparisons(detections: list[dict], excel_prices: dict[str, dic
     for item in detections:
         brochure_price, not_defined = comparison_brochure_price(item, "excel_from_price_candidate")
         if not_defined:
-            item["excel_status"] = "brochure_price_not_defined"
-            item["excel_message"] = from_price_not_defined_message(item)
+            item["excel_status"] = undefined_brochure_price_status(item)
+            item["excel_message"] = undefined_brochure_price_message(item)
         else:
             status, message = compare_two_prices(
                 brochure_price,
@@ -2129,8 +2164,8 @@ def attach_triple_comparisons(detections: list[dict]) -> None:
         excel_price = item.get("excel_price")
 
         if not_defined:
-            item["triple_status"] = "brochure_price_not_defined"
-            item["triple_message"] = from_price_not_defined_message(item)
+            item["triple_status"] = undefined_brochure_price_status(item)
+            item["triple_message"] = undefined_brochure_price_message(item)
         elif brochure_price is None:
             item["triple_status"] = "no_brochure_price"
             item["triple_message"] = "No brochure price was detected."
@@ -2202,7 +2237,15 @@ def is_from_price_detection(item: dict) -> bool:
     return bool(item.get("brochure_price_from_marker"))
 
 
+def is_missing_brochure_price_detection(item: dict) -> bool:
+    return bool(item.get("brochure_price_not_defined")) and is_missing_brochure_price_text(
+        str(item.get("brochure_price_text") or "")
+    )
+
+
 def comparison_brochure_price(item: dict, selection_key: str) -> tuple[float | None, bool]:
+    if is_missing_brochure_price_detection(item):
+        return None, True
     if not is_from_price_detection(item):
         return item.get("brochure_price"), bool(item.get("brochure_price_not_defined"))
     if not item.get(selection_key):
@@ -2211,6 +2254,8 @@ def comparison_brochure_price(item: dict, selection_key: str) -> tuple[float | N
 
 
 def triple_brochure_price(item: dict) -> tuple[float | None, bool]:
+    if is_missing_brochure_price_detection(item):
+        return None, True
     if not is_from_price_detection(item):
         return item.get("brochure_price"), bool(item.get("brochure_price_not_defined"))
     if not (item.get("website_from_price_candidate") and item.get("excel_from_price_candidate")):
@@ -2221,6 +2266,8 @@ def triple_brochure_price(item: dict) -> tuple[float | None, bool]:
 def update_from_price_display(detections: list[dict]) -> None:
     for item in detections:
         if not is_from_price_detection(item):
+            continue
+        if is_missing_brochure_price_detection(item):
             continue
         if "website_from_price_candidate" not in item and "excel_from_price_candidate" not in item:
             continue
@@ -2256,6 +2303,16 @@ def from_price_not_defined_message(item: dict) -> str:
     if is_from_price_detection(item):
         return "Brochure shows a 'from' price; only the lowest priced SKU in this item box is compared."
     return "Brochure shows a 'from' price; exact SKU price is not defined."
+
+
+def undefined_brochure_price_status(item: dict) -> str:
+    return "brochure_price_missing" if is_missing_brochure_price_detection(item) else "brochure_price_not_defined"
+
+
+def undefined_brochure_price_message(item: dict) -> str:
+    if is_missing_brochure_price_detection(item):
+        return "Brochure price is missing; website and Excel prices are shown as suggestions."
+    return from_price_not_defined_message(item)
 
 
 def mark_triple_not_checked(detections: list[dict]) -> None:

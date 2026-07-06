@@ -61,6 +61,7 @@ const labels = {
   different: "Различно",
   no_url: "Няма линк",
   no_brochure_price: "Няма цена в PDF",
+  brochure_price_missing: "PDF ?",
   brochure_price_not_defined: "Цена не е дефинирана",
   no_website_price: "Няма цена от сайта",
   no_excel_price: "Няма цена от Excel",
@@ -566,6 +567,7 @@ function translateMessage(message) {
     "No mapping entry and live lookup is off.": "Няма ръчно зададен линк и директното търсене е изключено.",
     "Excel price check mode does not place links.": "Режимът за проверка с Excel не поставя линкове.",
     "No brochure price was detected.": "Не е открита цена в PDF.",
+    "Brochure price is missing; website and Excel prices are shown as suggestions.": "Цената в PDF липсва; цените от сайта и Excel са показани като предложения.",
     "No website price was available.": "Няма налична цена от сайта.",
     "No euro website price was found by the Praktis browser lookup.": "Браузърът не откри евро цена в Praktis.",
     "Brochure and website prices match.": "Цените от PDF и сайта съвпадат.",
@@ -696,6 +698,7 @@ function numberCell(column, row, value, style) {
 function excelStatusStyle(value) {
   if (["mapped", "linked", "match", "website_price_found", "grouped_search"].includes(value)) return 4;
   if (["error", "unresolved", "different"].includes(value)) return 6;
+  if (["brochure_price_missing", "brochure_price_not_defined", "no_brochure_price"].includes(value)) return 5;
   return 5;
 }
 
