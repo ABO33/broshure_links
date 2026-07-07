@@ -112,7 +112,7 @@ def record_process_finished(request_id: str, meta: dict, result: dict, duration_
         _stats.successful_requests += 1
         _stats.last_success = event
 
-    slow_seconds = env_int("BROCHURE_SLOW_SECONDS", 600, minimum=1)
+    slow_seconds = env_int("BROCHURE_SLOW_SECONDS", 1800, minimum=1)
     level = "WARNING" if duration_seconds >= slow_seconds else "INFO"
     title = "Slow processing finished" if level == "WARNING" else "Processing finished"
     if env_bool("DISCORD_PROCESS_NOTIFICATIONS", True) or level == "WARNING":

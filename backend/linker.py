@@ -610,7 +610,7 @@ def detection_sku_expression(page: PageText, item: dict, header: bool) -> str:
     else:
         bottom = box["y"] + min(box["height"], 12)
 
-    lines = sku_expression_lines(page, left, right, top, bottom)
+    lines = sku_expression_lines(page, left, right, top, bottom, allow_overflow_original=header)
     return " ".join(lines)
 
 
@@ -718,7 +718,14 @@ def adjust_item_box_to_expression(page: PageText, item: dict, expression: str) -
     box["width"] = clamp(old_right - new_x, 8, page.width - new_x)
 
 
-def sku_expression_lines(page: PageText, left: float, right: float, top: float, bottom: float) -> list[str]:
+def sku_expression_lines(
+    page: PageText,
+    left: float,
+    right: float,
+    top: float,
+    bottom: float,
+    allow_overflow_original: bool = True,
+) -> list[str]:
     words = [
         word
         for word in page.words
@@ -732,13 +739,13 @@ def sku_expression_lines(page: PageText, left: float, right: float, top: float, 
     ]
     lines: list[str] = []
     for line in cluster_words_by_top(words, tolerance=2.3):
-        text = sku_expression_line_text(line)
+        text = sku_expression_line_text(line, right, allow_overflow_original)
         if text:
             lines.append(text)
     return lines
 
 
-def sku_expression_line_text(line: list[Word]) -> str:
+def sku_expression_line_text(line: list[Word], right: float, allow_overflow_original: bool) -> str:
     selected: list[tuple[float, float, str]] = []
     covered_until = -1.0
     for word in sorted(
@@ -746,13 +753,13 @@ def sku_expression_line_text(line: list[Word]) -> str:
         key=lambda item: (
             item.x0,
             -item.width,
-            expression_token_noise_score(expression_token_text(item)),
-            -len(expression_token_text(item)),
+            expression_token_noise_score(expression_token_text(item, right, allow_overflow_original)),
+            -len(expression_token_text(item, right, allow_overflow_original)),
         ),
     ):
         if word.x1 <= covered_until + 0.3 and is_expression_fragment(word.text):
             continue
-        text = expression_token_text(word)
+        text = expression_token_text(word, right, allow_overflow_original)
         if not text:
             continue
         selected.append((word.x0, word.x1, text))
@@ -779,12 +786,15 @@ def expression_token_noise_score(text: str) -> int:
     return score
 
 
-def expression_token_text(word: Word) -> str:
+def expression_token_text(word: Word, right: float | None = None, allow_overflow_original: bool = True) -> str:
     original = str(word.original_text or "").strip()
     text = str(word.text or "").strip()
     if text in {",", "-"}:
         return text
-    chosen = original if original and (word.comma_primary or contains_sku_expression_punctuation(original)) else text
+    use_original = bool(original and (word.comma_primary or contains_sku_expression_punctuation(original)))
+    if use_original and not allow_overflow_original and right is not None:
+        use_original = estimated_original_expression_right(word) <= right + 3.0
+    chosen = original if use_original else text
     chosen = chosen.replace("\u2013", "-").replace("\u2014", "-")
     return chosen if re.search(r"\d", chosen) and re.fullmatch(r"[\d,\-\s]+", chosen) else ""
 
@@ -1063,8 +1073,11 @@ def variant_sku_candidate_words(
     max_digits: int,
 ) -> list[Word]:
     virtual_by_original: dict[int, Word] = {}
+    item_sku_lengths = {len(sku) for sku in item_skus if is_ascii_digits(sku)}
     for word in words:
         virtual = merged_variant_sku_prefix(word, words, min_digits, max_digits)
+        if not virtual:
+            virtual = merged_table_sku_prefix(word, item_sku_lengths, min_digits, max_digits)
         if virtual and virtual.text not in item_skus:
             virtual_by_original[id(word)] = virtual
 
@@ -1097,6 +1110,7 @@ def merged_variant_sku_prefix(
 
     text = ""
     picked: list[Word] = []
+    candidate: Word | None = None
     for fragment in sorted(fragments, key=lambda item: (item.x0, item.x1)):
         trial = text + fragment.text
         if not word.text.startswith(trial):
@@ -1105,7 +1119,7 @@ def merged_variant_sku_prefix(
         picked.append(fragment)
         suffix_len = len(word.text) - len(text)
         if min_digits <= len(text) <= max_digits and 1 <= suffix_len <= 3:
-            return Word(
+            candidate = Word(
                 text=text,
                 x0=picked[0].x0,
                 x1=fragment.x1,
@@ -1115,17 +1129,101 @@ def merged_variant_sku_prefix(
                 original_text=word.text,
             )
 
+    if text == word.text:
+        original = str(word.original_text or word.text)
+        if original == word.text or not contains_sku_expression_punctuation(original):
+            broken = sku_prefix_from_fragment_break(word, picked, min_digits, max_digits)
+            if broken:
+                return broken
+        return None
+    return candidate
+
+
+def sku_prefix_from_fragment_break(
+    word: Word,
+    fragments: list[Word],
+    min_digits: int,
+    max_digits: int,
+) -> Word | None:
+    if len(fragments) < 2:
+        return None
+
+    for index in range(1, len(fragments)):
+        prefix_fragments = fragments[:index]
+        suffix_fragments = fragments[index:]
+        prefix = "".join(fragment.text for fragment in prefix_fragments)
+        suffix = "".join(fragment.text for fragment in suffix_fragments)
+        if not (min_digits <= len(prefix) <= max_digits and 1 <= len(suffix) <= 3):
+            continue
+
+        previous = fragments[index - 1]
+        current = fragments[index]
+        gap = current.x0 - previous.x1
+        prefix_height = median([fragment.height for fragment in prefix_fragments])
+        if gap < 2.6 or current.height < prefix_height + 0.9:
+            continue
+
+        return Word(
+            text=prefix,
+            x0=prefix_fragments[0].x0,
+            x1=previous.x1,
+            top=min(fragment.top for fragment in prefix_fragments),
+            bottom=max(fragment.bottom for fragment in prefix_fragments),
+            comma_primary=True,
+            original_text=word.text,
+        )
+
     return None
 
 
+def merged_table_sku_prefix(
+    word: Word,
+    item_sku_lengths: set[int],
+    min_digits: int,
+    max_digits: int,
+) -> Word | None:
+    if not is_ascii_digits(word.text) or word.height > 8.8:
+        return None
+    if len(word.text) < 9:
+        return None
+
+    possible_lengths = [
+        length
+        for length in item_sku_lengths
+        if min_digits <= length <= max_digits
+        and length < len(word.text)
+        and 2 <= len(word.text) - length <= 3
+    ]
+    if not possible_lengths:
+        return None
+
+    prefix_len = max(possible_lengths)
+    prefix = word.text[:prefix_len]
+    suffix = word.text[prefix_len:]
+    if not is_ascii_digits(prefix) or not is_ascii_digits(suffix):
+        return None
+
+    ratio = prefix_len / max(1, len(word.text))
+    return Word(
+        text=prefix,
+        x0=word.x0,
+        x1=word.x0 + word.width * ratio,
+        top=word.top,
+        bottom=word.bottom,
+        comma_primary=True,
+        original_text=word.text,
+    )
+
+
 def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padding: float) -> list[dict]:
+    footer_top = page.footer_top or page.height - 35
     candidates = [
         word
         for word in page.words
         if is_sku(word.text, min_digits, max_digits)
         and word.height <= 11
         and word.top > 3
-        and word.bottom < page.height - 35
+        and word.bottom < footer_top - 4
         and not set(word.text) == {"0"}
         and not is_after_comma_continuation(page, word, min_digits, max_digits)
     ]
@@ -1156,7 +1254,7 @@ def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padd
         row_items = sorted(primary_by_row[row_index], key=lambda item: item.x0)
         row_start = max(0.0, row_index * row_step)
         next_row = row_keys[row_pos + 1] if row_pos + 1 < len(row_keys) else None
-        row_end = min(page.height - 35, (next_row * row_step) if next_row is not None else row_start + row_step)
+        row_end = min(footer_top, (next_row * row_step) if next_row is not None else row_start + row_step)
 
         for index, word in enumerate(row_items):
             next_word = row_items[index + 1] if index + 1 < len(row_items) else None
@@ -1480,6 +1578,146 @@ def bgn_matches_euro(euro_price: float, leva_price: float) -> bool:
     return abs(expected - float(leva_price)) <= 0.02
 
 
+def item_price_box_status(page: PageText, box: dict, sku_word: Word, price_word: Word) -> tuple[str, str]:
+    euro_price = brochure_price_to_decimal(price_word.text)
+    if euro_price is None:
+        return "", ""
+
+    candidates = header_price_candidates_for_box(page, box, sku_word, price_word)
+
+    leva_candidate = find_parent_leva_candidate(candidates, price_word)
+    if leva_candidate and leva_candidate[2] is not None and not bgn_matches_euro(euro_price, leva_candidate[2]):
+        return (
+            "price_box_error",
+            f"Parent leva/euro conversion mismatch: {leva_candidate[2]:.2f} / {euro_price:.2f} is not {BGN_PER_EUR:.5f}.",
+        )
+
+    discount_issue = parent_discount_issue(page, box, price_word, euro_price, candidates)
+    if discount_issue:
+        return "promotion_percent_error", discount_issue
+
+    return "", ""
+
+
+def item_price_box_issue(page: PageText, box: dict, sku_word: Word, price_word: Word) -> str:
+    return item_price_box_status(page, box, sku_word, price_word)[1]
+
+
+def header_price_candidates_for_box(
+    page: PageText,
+    box: dict,
+    sku_word: Word,
+    price_word: Word,
+) -> list[tuple[float, float, float | None, str, Word]]:
+    right_edge = box["x"] + box["width"] + 3
+    top = max(0.0, box["y"] - 3)
+    bottom = min(page.height, box["y"] + min(box["height"], 72) + 3)
+    words: list[Word] = []
+    words.extend(find_direct_header_price_words(page, sku_word, right_edge))
+    words.extend(find_split_header_price_words(page, sku_word, right_edge))
+    words.extend(find_sequence_header_price_words(page, sku_word, right_edge))
+    words.extend(
+        word
+        for word in page.words
+        if is_ascii_digits(word.text)
+        and 3 <= len(word.text) <= 6
+        and word.height >= 8
+        and word.x0 >= sku_word.x0 + 8
+        and word.x0 <= right_edge
+    )
+    words.append(price_word)
+
+    candidates: list[tuple[float, float, float | None, str, Word]] = []
+    seen: set[tuple[int, int, str]] = set()
+    for word in words:
+        if word.x0 < box["x"] - 3 or word.x1 > right_edge:
+            continue
+        if word.top < top or word.bottom > bottom:
+            continue
+        price = brochure_price_to_decimal(word.text)
+        if price is None:
+            continue
+        key = (round(word.x0), round(word.x1), word.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append((word.x0, word.x1, price, word.text, word))
+    return sorted(candidates, key=lambda item: (item[0], item[1], -len(item[3])))
+
+
+def find_parent_leva_candidate(
+    candidates: list[tuple[float, float, float | None, str, Word]],
+    euro_word: Word,
+) -> tuple[float, float, float | None, str, Word] | None:
+    right_side = [
+        candidate
+        for candidate in candidates
+        if candidate[0] > euro_word.x1 + 0.5
+        and abs(candidate[4].mid_y - euro_word.mid_y) <= 11
+    ]
+    if not right_side:
+        return None
+    return sorted(right_side, key=lambda item: (item[0], -len(item[3])))[0]
+
+
+def parent_discount_issue(
+    page: PageText,
+    box: dict,
+    price_word: Word,
+    euro_price: float,
+    candidates: list[tuple[float, float, float | None, str, Word]],
+) -> str:
+    discount = find_discount_word(page, box, price_word)
+    if not discount:
+        return ""
+    shown_percent = parse_discount_percent(discount.text)
+    if shown_percent is None:
+        return ""
+
+    old_candidates = [
+        candidate
+        for candidate in candidates
+        if candidate[2] is not None
+        and candidate[2] > euro_price
+        and candidate[4].top > price_word.top + 6
+        and candidate[0] >= price_word.x0 - 8
+        and candidate[0] < discount.x0 + 4
+    ]
+    if not old_candidates:
+        return ""
+
+    old_price = sorted(old_candidates, key=lambda item: (abs(item[4].top - discount.top), item[0]))[0][2]
+    expected_percent = round((1 - (euro_price / old_price)) * 100)
+    if abs(expected_percent - abs(shown_percent)) <= 1:
+        return ""
+    return (
+        f"Promotion percent is not right: old {old_price:.2f}, current {euro_price:.2f}, "
+        f"shown {shown_percent}%, expected -{expected_percent}%."
+    )
+
+
+def find_discount_word(page: PageText, box: dict, price_word: Word) -> Word | None:
+    candidates = [
+        word
+        for word in page.words
+        if parse_discount_percent(word.text) is not None
+        and box["x"] - 3 <= word.x0 <= box["x"] + box["width"] + 3
+        and price_word.top - 2 <= word.top <= box["y"] + min(box["height"], 78)
+        and word.x0 >= price_word.x0 - 8
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda word: (abs(word.top - price_word.top), word.x0))[0]
+
+
+def parse_discount_percent(text: str) -> int | None:
+    match = re.fullmatch(r"-?\s*(\d{1,2})\s*%", str(text or "").strip())
+    if not match:
+        return None
+    value = int(match.group(1))
+    return -value if str(text).strip().startswith("-") else value
+
+
 def has_table_sku_column_header(sku_word: Word, header_line: list[Word]) -> bool:
     for word in header_line:
         if word.x0 > sku_word.x0 + 10 or word.x1 < sku_word.x0 - 28:
@@ -1585,11 +1823,31 @@ def detect_header_driven_boxes(
                 if index + 1 < len(row_words)
                 else page.width
             )
-            if is_variant_table_sku_word(page, word, min_digits, max_digits) and not find_direct_header_price_word(
-                page, word, right_edge
-            ):
-                continue
-            price_word = find_header_price_word(page, word, right_edge)
+            if is_variant_table_sku_word(page, word, min_digits, max_digits):
+                direct_price_word = find_direct_header_price_word(page, word, right_edge)
+                if direct_price_word and word.comma_primary:
+                    continue
+                if direct_price_word:
+                    price_word = direct_price_word
+                    left_edge = clamp(word.x0 - HEADER_SKU_TEXT_INSET, 0, page.width)
+                    right_edge = find_header_price_box_right(page, word, price_word, right_edge)
+                    top = clamp(min(word.top - 3, price_word.top - 13), 0, page.height)
+                    row_headers.append(
+                        {
+                            "word": word,
+                            "price_word": price_word,
+                            "left": left_edge,
+                            "right": clamp(right_edge, left_edge + 8, page.width),
+                            "top": top,
+                        }
+                    )
+                    continue
+                sequence_price_word = find_header_price_word(page, word, right_edge)
+                if not sequence_price_word:
+                    continue
+                price_word = sequence_price_word
+            else:
+                price_word = find_header_price_word(page, word, right_edge)
             if not price_word:
                 continue
             left_edge = clamp(word.x0 - HEADER_SKU_TEXT_INSET, 0, page.width)
@@ -1626,6 +1884,7 @@ def detect_header_driven_boxes(
         }
         price_text = header["price_word"].text
         price_from_marker = has_from_price_marker(page, box, header["price_word"])
+        price_box_status, price_box_issue = item_price_box_status(page, box, header["word"], header["price_word"])
         detections.append(
             _detection(
                 page,
@@ -1635,6 +1894,8 @@ def detect_header_driven_boxes(
                 0.94,
                 brochure_price_display_text(price_text),
                 brochure_price_to_decimal(price_text),
+                status=price_box_status,
+                message=price_box_issue,
                 brochure_price_not_defined=is_missing_brochure_price_text(price_text),
                 brochure_price_from_marker=price_from_marker,
             )
@@ -1656,9 +1917,10 @@ def cluster_words_by_top(words: list[Word], tolerance: float) -> list[list[Word]
 def find_header_price_word(page: PageText, sku_word: Word, right_edge: float) -> Word | None:
     prices = find_direct_header_price_words(page, sku_word, right_edge)
     prices.extend(find_split_header_price_words(page, sku_word, right_edge))
+    prices.extend(find_sequence_header_price_words(page, sku_word, right_edge))
     if not prices:
         return None
-    return sorted(prices, key=lambda item: (item.x0, item.top))[0]
+    return sorted(prices, key=lambda item: (item.x0, item.top, -len(item.text)))[0]
 
 
 def find_direct_header_price_word(page: PageText, sku_word: Word, right_edge: float) -> Word | None:
@@ -1788,11 +2050,21 @@ def find_header_price_box_right(
         and 4 <= word.top - sku_word.top <= 44
         and abs(word.mid_y - price_word.mid_y) <= 26
     ]
+    price_words.extend(
+        word
+        for word in find_split_header_price_words(page, sku_word, default_right_edge)
+        if abs(word.mid_y - price_word.mid_y) <= 26
+    )
+    price_words.extend(
+        word
+        for word in find_sequence_header_price_words(page, sku_word, default_right_edge)
+        if abs(word.mid_y - price_word.mid_y) <= 26
+    )
     if not price_words:
         return default_right_edge
 
     group_right = price_word.x1
-    for word in sorted(price_words, key=lambda item: item.x0):
+    for word in sorted(price_words, key=lambda item: (item.x0, -len(item.text))):
         if word.x1 < price_word.x0 - 1:
             continue
         if word.x0 <= group_right + HEADER_PRICE_GROUP_GAP:
@@ -1802,6 +2074,75 @@ def find_header_price_box_right(
     if default_right_edge - right <= HEADER_PAGE_EDGE_TOLERANCE:
         return default_right_edge
     return clamp(right, sku_word.x0 + 16, default_right_edge)
+
+
+def find_sequence_header_price_words(page: PageText, sku_word: Word, right_edge: float) -> list[Word]:
+    tokens = [
+        word
+        for word in page.words
+        if is_ascii_digits(word.text)
+        and len(word.text) <= 2
+        and word.height >= 7
+        and word.x0 >= sku_word.x0 + 8
+        and word.x0 < right_edge - 1
+        and -2 <= word.top - sku_word.top <= 44
+    ]
+    prices: list[Word] = []
+    for line in cluster_words_by_top(tokens, tolerance=3.2):
+        sequence: list[Word] = []
+        previous: Word | None = None
+        for word in sorted(line, key=lambda item: item.x0):
+            gap = word.x0 - previous.x1 if previous else 0
+            if previous and gap > 4.5:
+                prices.extend(build_header_prices_from_digit_sequence(sequence))
+                sequence = []
+            sequence.append(word)
+            previous = word
+        prices.extend(build_header_prices_from_digit_sequence(sequence))
+    return dedupe_synthetic_words(prices)
+
+
+def build_header_prices_from_digit_sequence(sequence: list[Word]) -> list[Word]:
+    digits = [word for word in sequence if is_ascii_digits(word.text)]
+    if len(digits) < 3:
+        return []
+
+    raw = "".join(word.text for word in digits)
+    prices: list[Word] = []
+    for start in range(len(digits)):
+        text = ""
+        for end in range(start, min(len(digits), start + 6)):
+            text += digits[end].text
+            if not 3 <= len(text) <= 6:
+                continue
+            if set(text) == {"0"}:
+                continue
+            group = digits[start : end + 1]
+            if max(word.height for word in group) < 13:
+                continue
+            prices.append(
+                Word(
+                    text=text,
+                    x0=group[0].x0,
+                    x1=group[-1].x1,
+                    top=min(word.top for word in group),
+                    bottom=max(word.bottom for word in group),
+                    original_text=raw,
+                )
+            )
+    return prices
+
+
+def dedupe_synthetic_words(words: list[Word]) -> list[Word]:
+    seen: set[tuple[int, int, str]] = set()
+    clean: list[Word] = []
+    for word in sorted(words, key=lambda item: (item.x0, item.x1, item.text)):
+        key = (round(word.x0), round(word.x1), word.text)
+        if key in seen:
+            continue
+        seen.add(key)
+        clean.append(word)
+    return clean
 
 
 def is_multiline_header_continuation(word: Word, candidates: list[Word]) -> bool:
@@ -1855,13 +2196,20 @@ def find_large_image_boundary_top(page: PageText, current: dict, headers: list[d
     candidates: list[float] = []
     for block in image_blocks:
         top = float(block["top"])
+        block_x0 = float(block["x0"])
+        block_x1 = float(block["x1"])
+        block_width = block_x1 - block_x0
         if top <= current["top"] + 85:
             continue
         if top >= proposed_bottom - 18:
             continue
         if top < page.height * 0.35:
             continue
-        overlap = min(right, float(block["x1"])) - max(left, float(block["x0"]))
+        if block_width < current_width * 1.25:
+            continue
+        if block_x0 >= left - 8 and block_x1 <= right + 8:
+            continue
+        overlap = min(right, block_x1) - max(left, block_x0)
         if overlap < max(35.0, current_width * 0.25):
             continue
         candidates.append(top)
@@ -2017,11 +2365,11 @@ def find_large_image_blocks(page) -> list[dict]:
             continue
         width = x1 - x0
         height = bottom - top
-        if width < page_width * 0.82:
+        is_page_wide = width >= page_width * 0.82 and x0 <= page_width * 0.08 and x1 >= page_width * 0.92
+        is_multi_column = width >= page_width * 0.38
+        if not (is_page_wide or is_multi_column):
             continue
         if height < page_height * 0.18:
-            continue
-        if x0 > page_width * 0.08 or x1 < page_width * 0.92:
             continue
         blocks.append(
             {
@@ -2050,9 +2398,38 @@ def find_footer_top(page) -> float | None:
         if rect.get("width", 0) < float(page.width) * 0.45:
             continue
         footer_candidates.append(float(rect["top"]))
+
+    contact_footer_top = find_contact_footer_top(page)
+    if contact_footer_top is not None:
+        footer_candidates.append(contact_footer_top)
+
     if footer_candidates:
         return min(footer_candidates)
     return float(page.height) - 35
+
+
+def find_contact_footer_top(page) -> float | None:
+    try:
+        words = page.extract_words(x_tolerance=1, y_tolerance=3, keep_blank_chars=False, use_text_flow=False)
+    except Exception:
+        return None
+
+    page_height = float(page.height)
+    bottom_words = [
+        word
+        for word in words
+        if float(word.get("top", 0)) >= page_height * 0.62
+    ]
+    phone_prefixes = [
+        word
+        for word in bottom_words
+        if str(word.get("text", "")).strip() in {"+359", "359"}
+    ]
+    if len(phone_prefixes) < 3:
+        return None
+
+    first_phone_top = min(float(word["top"]) for word in phone_prefixes)
+    return clamp(first_phone_top - 36.0, page_height * 0.55, page_height - 35)
 
 
 def brochure_price_to_decimal(raw: str) -> float | None:

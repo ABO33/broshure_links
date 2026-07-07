@@ -690,6 +690,8 @@ tbody tr:last-child td {
 .badge.link_not_found,
 .badge.price_only,
 .badge.repeating_item,
+.badge.price_box_error,
+.badge.promotion_percent_error,
 .badge.table_header_error,
 .badge.sku_illustration_error,
 .badge.group_title_missing,

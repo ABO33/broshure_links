@@ -114,12 +114,28 @@ class AppHandler(BaseHTTPRequestHandler):
                 result.get("summary", {}).get("linkedAnnotations"),
                 result.get("summary", {}).get("pages"),
             )
-            self.send_json(result)
+            try:
+                self.send_json(result)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+                logger.warning(
+                    "Client disconnected before process result was delivered: request=%s duration=%.2fs error=%s",
+                    request_id,
+                    duration,
+                    exc,
+                )
         except Exception as exc:
             duration = time.monotonic() - started
             record_process_failed(request_id, meta, exc, duration)
             logger.exception("Process request failed: request=%s duration=%.2fs", request_id, duration)
-            self.send_json({"error": str(exc)}, status=500)
+            try:
+                self.send_json({"error": str(exc)}, status=500)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as send_exc:
+                logger.warning(
+                    "Client disconnected before error response was delivered: request=%s duration=%.2fs error=%s",
+                    request_id,
+                    duration,
+                    send_exc,
+                )
 
     def parse_multipart(self):
         content_type = self.headers.get("Content-Type", "")
@@ -181,7 +197,7 @@ def run(host: str | None = None, port: int | None = None):
     configure_logging()
     start_health_monitor()
     host = host or os.environ.get("BROCHURE_HOST", "0.0.0.0")
-    port = port or int(os.environ.get("BROCHURE_PORT", "5174"))
+    port = port or int(os.environ.get("BROCHURE_PORT", "5111"))
     server = ThreadingHTTPServer((host, port), AppHandler)
     logger.info("Praktis Brochure Linker listening on %s:%s", host, port)
     if host == "0.0.0.0":
