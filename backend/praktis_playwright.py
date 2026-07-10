@@ -9,6 +9,7 @@ from pathlib import Path
 from random import uniform
 import re
 import tempfile
+from typing import Callable
 from urllib.parse import quote, urljoin, urlparse
 
 from .logging_config import configure_logging
@@ -36,6 +37,7 @@ USER_AGENT = (
 )
 logger = logging.getLogger(__name__)
 _PROFILE_LAUNCH_FAILED = False
+ProgressCallback = Callable[[int, int, str], None]
 
 try:
     from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -58,15 +60,20 @@ class BrowserSession:
             self.temp_profile.cleanup()
 
 
-def compare_prices_with_playwright(skus: list[str]) -> dict[str, dict]:
+def compare_prices_with_playwright(
+    skus: list[str],
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, dict]:
     configure_logging()
     unique_skus = sorted({str(sku).strip() for sku in skus if str(sku).strip()})
     if not unique_skus:
+        report_progress(progress_callback, 1, 1, "No website SKUs to check")
         return {}
     logger.info("Starting Praktis browser SKU lookup: skus=%s", len(unique_skus))
 
     if async_playwright is None:
         logger.error("Playwright is unavailable for Praktis SKU lookup")
+        report_progress(progress_callback, len(unique_skus), len(unique_skus), "Website browser unavailable")
         return {
             sku: {
                 "sku": sku,
@@ -80,10 +87,11 @@ def compare_prices_with_playwright(skus: list[str]) -> dict[str, dict]:
         }
 
     try:
-        results = asyncio.run(_run_batch(unique_skus))
+        results = asyncio.run(_run_batch(unique_skus, progress_callback))
     except Exception as exc:
         message = f"Playwright price lookup failed: {exc}"
         logger.exception("Praktis browser SKU lookup failed")
+        report_progress(progress_callback, len(unique_skus), len(unique_skus), "Website checks stopped")
         return {
             sku: {
                 "sku": sku,
@@ -103,7 +111,10 @@ def compare_prices_with_playwright(skus: list[str]) -> dict[str, dict]:
     return {result["sku"]: result for result in results}
 
 
-def count_search_results_with_playwright(urls: list[str] | dict[str, list[str]]) -> dict[str, dict]:
+def count_search_results_with_playwright(
+    urls: list[str] | dict[str, list[str]],
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, dict]:
     configure_logging()
     if isinstance(urls, dict):
         requests = [
@@ -121,11 +132,13 @@ def count_search_results_with_playwright(urls: list[str] | dict[str, list[str]])
     ]
     unique_urls = [url for url, _skus in requests]
     if not unique_urls:
+        report_progress(progress_callback, 1, 1, "No complex links to validate")
         return {}
     logger.info("Starting grouped Praktis search validation: urls=%s", len(unique_urls))
 
     if async_playwright is None:
         logger.error("Playwright is unavailable for grouped Praktis validation")
+        report_progress(progress_callback, len(unique_urls), len(unique_urls), "Group browser unavailable")
         return {
             url: {
                 "count_status": "playwright_unavailable",
@@ -135,10 +148,11 @@ def count_search_results_with_playwright(urls: list[str] | dict[str, list[str]])
         }
 
     try:
-        results = asyncio.run(_run_count_batch(requests))
+        results = asyncio.run(_run_count_batch(requests, progress_callback))
     except Exception as exc:
         message = f"Playwright grouped search count failed: {exc}"
         logger.exception("Grouped Praktis search validation failed")
+        report_progress(progress_callback, len(unique_urls), len(unique_urls), "Group checks stopped")
         return {
             url: {
                 "count_status": "error",
@@ -154,7 +168,10 @@ def count_search_results_with_playwright(urls: list[str] | dict[str, list[str]])
     return {result["url"]: result for result in results}
 
 
-async def _run_batch(skus: list[str]) -> list[dict]:
+async def _run_batch(
+    skus: list[str],
+    progress_callback: ProgressCallback | None = None,
+) -> list[dict]:
     sem = asyncio.Semaphore(CONCURRENCY)
     Path(PROFILE_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -165,12 +182,25 @@ async def _run_batch(skus: list[str]) -> list[dict]:
         await _warm_session(context)
         tasks = [asyncio.create_task(_scrape_one_sku(context, sku, sem)) for sku in skus]
         try:
-            return await asyncio.gather(*tasks)
+            results: list[dict] = []
+            for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
+                result = await task
+                results.append(result)
+                report_progress(
+                    progress_callback,
+                    completed,
+                    len(tasks),
+                    f"SKU {completed} of {len(tasks)}: {result.get('sku', '')}",
+                )
+            return results
         finally:
             await session.close()
 
 
-async def _run_count_batch(requests: list[tuple[str, list[str]]]) -> list[dict]:
+async def _run_count_batch(
+    requests: list[tuple[str, list[str]]],
+    progress_callback: ProgressCallback | None = None,
+) -> list[dict]:
     sem = asyncio.Semaphore(CONCURRENCY)
     Path(PROFILE_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -184,9 +214,29 @@ async def _run_count_batch(requests: list[tuple[str, list[str]]]) -> list[dict]:
             for url, expected_skus in requests
         ]
         try:
-            return await asyncio.gather(*tasks)
+            results: list[dict] = []
+            for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
+                result = await task
+                results.append(result)
+                report_progress(
+                    progress_callback,
+                    completed,
+                    len(tasks),
+                    f"Complex link {completed} of {len(tasks)}",
+                )
+            return results
         finally:
             await session.close()
+
+
+def report_progress(
+    callback: ProgressCallback | None,
+    completed: int,
+    total: int,
+    detail: str,
+) -> None:
+    if callback is not None:
+        callback(completed, total, detail)
 
 
 async def _launch_browser_context(p):

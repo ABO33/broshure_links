@@ -8,7 +8,16 @@ const pageModeInputs = [...document.querySelectorAll("input[name='pageMode']")];
 const pageNumberInput = document.querySelector("#pageNumberInput");
 const pageStartInput = document.querySelector("#pageStartInput");
 const pageEndInput = document.querySelector("#pageEndInput");
-const progress = document.querySelector("#progress");
+const shell = document.querySelector(".shell");
+const processingOverlay = document.querySelector("#processingOverlay");
+const progressStage = document.querySelector("#progressStage");
+const progressPercent = document.querySelector("#progressPercent");
+const progressTrack = document.querySelector("#progressTrack");
+const progressBar = document.querySelector("#progressBar");
+const progressDetail = document.querySelector("#progressDetail");
+const progressWork = document.querySelector("#progressWork");
+const progressElapsed = document.querySelector("#progressElapsed");
+const progressEta = document.querySelector("#progressEta");
 const processButton = document.querySelector("#processButton");
 const summaryGrid = document.querySelector("#summaryGrid");
 const resultsBody = document.querySelector("#resultsBody");
@@ -23,6 +32,10 @@ const filterButtons = Object.fromEntries(
 
 let lastResult = null;
 let activeFilter = null;
+let progressTimer = null;
+let progressRequestId = "";
+let progressPollActive = false;
+let lastProgressSnapshot = null;
 
 const tableState = {
   textFilters: {
@@ -91,6 +104,33 @@ const excelColumns = [
   ["url", "Линк"]
 ];
 
+const progressStageLabels = {
+  starting: "Подготовка на файла",
+  extract_pdf: "Четене на PDF файла",
+  detect_items: "Откриване на артикули и SKU",
+  excel_load: "Четене на цените от Excel",
+  resolve_links: "Подготовка на линковете",
+  website_lookup: "Проверка на SKU в praktis.bg",
+  excel_compare: "Сравняване на цените с Excel",
+  triple_compare: "Тройна проверка на цените",
+  group_links: "Създаване и проверка на комплексни линкове",
+  write_pdf: "Създаване на крайния PDF файл",
+  finalize: "Подготовка на резултатите",
+  complete: "Обработката е завършена",
+  error: "Обработката е прекъсната"
+};
+
+const progressUnitLabels = {
+  extract_pdf: "страници",
+  detect_items: "страници",
+  resolve_links: "SKU",
+  website_lookup: "SKU",
+  excel_compare: "проверки",
+  triple_compare: "SKU",
+  group_links: "групи",
+  write_pdf: "стъпки"
+};
+
 pdfInput.addEventListener("change", () => {
   pdfLabel.textContent = pdfInput.files[0]?.name || "Изберете PDF брошура";
 });
@@ -148,17 +188,25 @@ form.addEventListener("submit", async (event) => {
   setBusy(true);
   closeColumnMenu();
   downloads.hidden = true;
-  resultHint.textContent = processingMessage(getSelectedMode());
+  const selectedMode = getSelectedMode();
+  resultHint.textContent = processingMessage(selectedMode);
+  const requestId = createRequestId();
+  const formData = new FormData(form);
+  formData.set("requestId", requestId);
+  startProgressTracking(requestId, selectedMode);
 
   try {
     const response = await fetch("/api/process", {
       method: "POST",
-      body: new FormData(form)
+      body: formData
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Обработката е неуспешна");
 
+    await showCompletedProgress();
+
     lastResult = payload;
+    rememberProcessingSpeed(selectedMode, payload.summary?.uniqueSkus, lastProgressSnapshot?.elapsedSeconds);
     resetTableState();
     renderSummary(payload.summary);
     renderRows();
@@ -167,10 +215,13 @@ form.addEventListener("submit", async (event) => {
       ? "Част от проверките в сайта бяха блокирани; използвани са линкове към търсене, когато е възможно."
       : completionMessage(payload.summary.mode);
   } catch (error) {
+    showFailedProgress(error.message);
+    await delay(650);
     lastResult = null;
     resultsBody.innerHTML = `<tr class="empty"><td colspan="12">${escapeHtml(error.message)}</td></tr>`;
     resultHint.textContent = "Обработката е неуспешна.";
   } finally {
+    stopProgressTracking();
     setBusy(false);
   }
 });
@@ -280,7 +331,185 @@ function resetTableState() {
 function setBusy(isBusy) {
   processButton.disabled = isBusy;
   processButton.textContent = isBusy ? "Обработка..." : "Обработи PDF";
-  progress.hidden = !isBusy;
+  document.body.classList.toggle("is-processing", isBusy);
+  shell.inert = isBusy;
+  shell.setAttribute("aria-busy", String(isBusy));
+  processingOverlay.hidden = !isBusy;
+  if (isBusy) {
+    updateProgressOverlay({
+      status: "running",
+      phase: "starting",
+      percent: 0,
+      completed: 0,
+      total: 0,
+      elapsedSeconds: 0,
+      estimatedSecondsRemaining: null
+    });
+    processingOverlay.querySelector(".processing-card")?.focus();
+  }
+}
+
+function createRequestId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `request-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function startProgressTracking(requestId, mode) {
+  stopProgressTracking();
+  progressRequestId = requestId;
+  lastProgressSnapshot = { mode, status: "running", phase: "starting", elapsedSeconds: 0 };
+  window.setTimeout(pollProgress, 180);
+  progressTimer = window.setInterval(pollProgress, 800);
+}
+
+function stopProgressTracking() {
+  if (progressTimer) window.clearInterval(progressTimer);
+  progressTimer = null;
+  progressRequestId = "";
+  progressPollActive = false;
+}
+
+async function pollProgress() {
+  if (!progressRequestId || progressPollActive) return;
+  progressPollActive = true;
+  try {
+    const response = await fetch(`/api/progress?requestId=${encodeURIComponent(progressRequestId)}`, {
+      cache: "no-store"
+    });
+    if (!response.ok) return;
+    const snapshot = await response.json();
+    lastProgressSnapshot = snapshot;
+    updateProgressOverlay(snapshot);
+  } catch (_error) {
+    // Processing continues even if one lightweight progress poll is missed.
+  } finally {
+    progressPollActive = false;
+  }
+}
+
+function updateProgressOverlay(snapshot) {
+  const isComplete = snapshot.status === "complete";
+  const rawPercent = Number(snapshot.percent) || 0;
+  const shownPercent = isComplete ? 100 : Math.min(99, Math.max(0, Math.floor(rawPercent)));
+  progressStage.textContent = progressStageLabels[snapshot.phase] || "Обработка на файла";
+  progressPercent.textContent = `${shownPercent}%`;
+  progressBar.style.width = `${shownPercent}%`;
+  progressTrack.setAttribute("aria-valuenow", String(shownPercent));
+  progressDetail.textContent = progressDetailText(snapshot);
+  progressWork.textContent = progressWorkText(snapshot);
+  progressElapsed.textContent = formatDuration(snapshot.elapsedSeconds || 0);
+  progressEta.textContent = progressEtaText(snapshot);
+  processingOverlay.classList.toggle("has-error", snapshot.status === "error");
+}
+
+function progressDetailText(snapshot) {
+  const completed = Number(snapshot.completed) || 0;
+  const total = Number(snapshot.total) || 0;
+  const sku = String(snapshot.detail || "").match(/\b\d{5,12}\b/)?.[0];
+  if (snapshot.status === "complete") return "PDF файлът и справката са готови.";
+  if (snapshot.status === "error") return snapshot.error || "Възникна грешка при обработката.";
+  if (snapshot.phase === "starting") return "Файлът се изпраща към сървъра...";
+  if (snapshot.phase === "extract_pdf") return total ? `Прочетена страница ${completed} от ${total}.` : "PDF файлът се отваря...";
+  if (snapshot.phase === "detect_items") return total ? `Анализирана страница ${completed} от ${total}.` : "Търсят се продуктови клетки.";
+  if (snapshot.phase === "website_lookup") return sku ? `Проверява се SKU ${sku}.` : "Подготвя се защитената връзка с Praktis.";
+  if (snapshot.phase === "group_links") return total ? `Обработена комплексна група ${Math.min(completed, total)} от ${total}.` : "Подготвят се комплексните линкове.";
+  if (snapshot.phase === "excel_compare" || snapshot.phase === "triple_compare") return total ? `Извършена проверка ${completed} от ${total}.` : "Сравняват се цените.";
+  if (snapshot.phase === "write_pdf") return "Линковете се записват в крайния PDF файл.";
+  if (snapshot.phase === "finalize") return "Таблицата с резултати се подготвя.";
+  return "Обработката продължава...";
+}
+
+function progressWorkText(snapshot) {
+  const completed = Number(snapshot.completed) || 0;
+  const total = Number(snapshot.total) || 0;
+  if (snapshot.status === "complete") return "100%";
+  if (!total) return "Подготовка...";
+  const unit = progressUnitLabels[snapshot.phase] || "стъпки";
+  return `${Math.min(completed, total)} от ${total} ${unit}`;
+}
+
+function progressEtaText(snapshot) {
+  if (snapshot.status === "complete") return "Готово";
+  if (snapshot.status === "error") return "Не е приложимо";
+  let remaining = Number(snapshot.estimatedSecondsRemaining);
+  if (!Number.isFinite(remaining) || remaining <= 0) {
+    remaining = historicalRemainingEstimate(snapshot);
+  }
+  if (!Number.isFinite(remaining) || remaining <= 0) return "Изчислява се...";
+  const finish = new Date(Date.now() + remaining * 1000);
+  const time = new Intl.DateTimeFormat("bg-BG", { hour: "2-digit", minute: "2-digit" }).format(finish);
+  return `Около ${time} ч. (остават ${formatDuration(remaining)})`;
+}
+
+function formatDuration(seconds) {
+  const value = Math.max(0, Math.round(Number(seconds) || 0));
+  if (value < 60) return `${value} сек.`;
+  let hours = Math.floor(value / 3600);
+  let minutes = Math.max(1, Math.round((value % 3600) / 60));
+  if (minutes === 60) {
+    hours += 1;
+    minutes = 0;
+  }
+  if (!hours) return `${minutes} мин.`;
+  return minutes ? `${hours} ч. ${minutes} мин.` : `${hours} ч.`;
+}
+
+function historicalRemainingEstimate(snapshot) {
+  if (snapshot.phase !== "website_lookup" || !snapshot.total) return null;
+  try {
+    const history = JSON.parse(localStorage.getItem("brochureProcessingSpeeds") || "{}");
+    const secondsPerSku = Number(history[snapshot.mode]?.secondsPerSku);
+    if (!Number.isFinite(secondsPerSku) || secondsPerSku <= 0) return null;
+    return Math.max(1, secondsPerSku * Math.max(0, snapshot.total - snapshot.completed));
+  } catch (_error) {
+    return null;
+  }
+}
+
+function rememberProcessingSpeed(mode, skuCount, elapsedSeconds) {
+  const skus = Number(skuCount);
+  const elapsed = Number(elapsedSeconds);
+  if (!mode || !skus || !elapsed) return;
+  try {
+    const history = JSON.parse(localStorage.getItem("brochureProcessingSpeeds") || "{}");
+    const previous = history[mode] || {};
+    const measured = elapsed / skus;
+    history[mode] = {
+      secondsPerSku: previous.secondsPerSku ? previous.secondsPerSku * 0.65 + measured * 0.35 : measured,
+      samples: Math.min(20, (Number(previous.samples) || 0) + 1)
+    };
+    localStorage.setItem("brochureProcessingSpeeds", JSON.stringify(history));
+  } catch (_error) {
+    // Browsers with disabled storage still receive the live backend ETA.
+  }
+}
+
+async function showCompletedProgress() {
+  await pollProgress();
+  const snapshot = {
+    ...(lastProgressSnapshot || {}),
+    status: "complete",
+    phase: "complete",
+    percent: 100,
+    estimatedSecondsRemaining: 0
+  };
+  lastProgressSnapshot = snapshot;
+  updateProgressOverlay(snapshot);
+  await delay(450);
+}
+
+function showFailedProgress(message) {
+  updateProgressOverlay({
+    ...(lastProgressSnapshot || {}),
+    status: "error",
+    phase: "error",
+    error: message,
+    estimatedSecondsRemaining: null
+  });
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 function updateModeState() {

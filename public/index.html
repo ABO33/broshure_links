@@ -139,11 +139,6 @@
             </div>
           </div>
 
-          <div id="progress" class="progress" hidden>
-            <span></span>
-            <p>PDF файлът се обработва...</p>
-          </div>
-
           <div id="summaryGrid" class="summary">
             <div><strong>0</strong><span>Кодове</span></div>
             <div><strong>0</strong><span>Варианти</span></div>
@@ -289,6 +284,42 @@
         </section>
       </form>
     </main>
+
+    <div id="processingOverlay" class="processing-overlay" role="dialog" aria-modal="true" aria-labelledby="progressStage" hidden>
+      <section class="processing-card" tabindex="-1">
+        <div class="processing-heading">
+          <span class="processing-spinner" aria-hidden="true"></span>
+          <div>
+            <p class="processing-kicker">Обработка на брошура</p>
+            <h2 id="progressStage">Подготовка на файла</h2>
+          </div>
+          <strong id="progressPercent" class="progress-percent">0%</strong>
+        </div>
+
+        <div id="progressTrack" class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <span id="progressBar"></span>
+        </div>
+
+        <p id="progressDetail" class="progress-detail">Файлът се изпраща към сървъра...</p>
+
+        <div class="progress-stats">
+          <div>
+            <span>Изпълнено</span>
+            <strong id="progressWork">Подготовка...</strong>
+          </div>
+          <div>
+            <span>Изминало време</span>
+            <strong id="progressElapsed">0 сек.</strong>
+          </div>
+          <div>
+            <span>Очакван край</span>
+            <strong id="progressEta">Изчислява се...</strong>
+          </div>
+        </div>
+
+        <p class="processing-note">Прозорецът може да остане отворен, докато обработката завърши.</p>
+      </section>
+    </div>
 
     <script type="module" src="/app.js"></script>
   </body>

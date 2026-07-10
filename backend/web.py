@@ -8,8 +8,9 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
+import re
 import time
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 from .linker import process_brochure
@@ -23,6 +24,7 @@ from .observability import (
     record_process_started,
     start_health_monitor,
 )
+from .progress import create_progress, get_progress
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +37,14 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/progress":
+            request_id = str(parse_qs(parsed.query).get("requestId", [""])[0]).strip()
+            progress = get_progress(request_id)
+            if progress is None:
+                self.send_json({"status": "pending", "requestId": request_id}, status=404)
+            else:
+                self.send_json(progress)
+            return
         if parsed.path == "/api/health":
             self.send_json(local_health())
             return
@@ -55,6 +65,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         request_id = uuid4().hex[:10]
+        progress_reporter = None
         started = time.monotonic()
         meta: dict = {"client": self.client_address[0] if self.client_address else ""}
         try:
@@ -64,6 +75,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": "Upload a PDF brochure first."}, status=400)
                 return
 
+            supplied_request_id = str(fields.get("requestId") or "").strip()
+            if re.fullmatch(r"[A-Za-z0-9-]{8,64}", supplied_request_id):
+                request_id = supplied_request_id
+
             meta.update(
                 {
                     "file": pdf["filename"],
@@ -71,6 +86,11 @@ class AppHandler(BaseHTTPRequestHandler):
                     "mode": fields.get("mode", ""),
                     "page_mode": fields.get("pageMode", "all"),
                 }
+            )
+            progress_reporter = create_progress(
+                request_id,
+                fields.get("mode", "") or "fallback_links",
+                pdf["filename"],
             )
             record_process_started(request_id, meta)
             logger.info(
@@ -103,8 +123,10 @@ class AppHandler(BaseHTTPRequestHandler):
                     "maxDigits": fields.get("maxDigits", "12"),
                     "boxPadding": fields.get("boxPadding", "0"),
                 },
+                progress_callback=progress_reporter.update,
             )
             duration = time.monotonic() - started
+            progress_reporter.finish()
             record_process_finished(request_id, meta, result, duration)
             logger.info(
                 "Process request finished: request=%s duration=%.2fs rows=%s links=%s pages=%s",
@@ -125,6 +147,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
         except Exception as exc:
             duration = time.monotonic() - started
+            if progress_reporter is not None:
+                progress_reporter.fail(exc)
             record_process_failed(request_id, meta, exc, duration)
             logger.exception("Process request failed: request=%s duration=%.2fs", request_id, duration)
             try:
@@ -190,7 +214,11 @@ class AppHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def log_message(self, format, *args):
-        logger.info("%s - %s", self.address_string(), format % args)
+        message = format % args
+        if "GET /api/progress?" in message:
+            logger.debug("%s - %s", self.address_string(), message)
+            return
+        logger.info("%s - %s", self.address_string(), message)
 
 
 def run(host: str | None = None, port: int | None = None):

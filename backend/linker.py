@@ -5,7 +5,7 @@ from io import BytesIO
 import logging
 import math
 import re
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlparse
 
 import pdfplumber
@@ -74,6 +74,7 @@ MAX_SHORTHAND_RANGE_ITEMS = 60
 UNDEFINED_BROCHURE_PRICE_TEXT = "Not defined"
 MISSING_BROCHURE_PRICE_TEXT = "?"
 logger = logging.getLogger(__name__)
+ProgressCallback = Callable[[str, int, int, str], None]
 
 
 def process_brochure(
@@ -84,6 +85,7 @@ def process_brochure(
     options: dict | None = None,
     excel_bytes: bytes | None = None,
     excel_name: str = "",
+    progress_callback: ProgressCallback | None = None,
 ) -> dict:
     configure_logging()
     options = options or {}
@@ -108,7 +110,8 @@ def process_brochure(
         max_digits,
         box_padding,
     )
-    pages = extract_text_pages(pdf_bytes, min_digits, max_digits)
+    report_progress(progress_callback, "extract_pdf", 0, 1, "Opening PDF")
+    pages = extract_text_pages(pdf_bytes, min_digits, max_digits, progress_callback)
     logger.info("Extracted readable text from %s PDF pages", len(pages))
     process_pages, page_scope = select_processing_pages(pages, options)
     logger.info(
@@ -122,31 +125,38 @@ def process_brochure(
         max_digits,
         box_padding,
         skip_last_page=page_scope == "all",
+        progress_callback=progress_callback,
     )
     logger.info("Detected %s SKU/link boxes", len(detections))
     groups = attach_variant_parent_groups(detections)
     logger.info("Detected %s complex SKU groups", len(groups))
     flag_repeated_page_skus(detections)
     skus = sorted({item["sku"] for item in detections})
+    if excel_prices_enabled:
+        report_progress(progress_callback, "excel_load", 0, 1, "Reading Excel prices")
     excel_prices = parse_excel_prices(excel_bytes, excel_name) if excel_bytes else {}
+    if excel_prices_enabled:
+        report_progress(progress_callback, "excel_load", 1, 1, f"{len(excel_prices)} Excel rows")
     if excel_bytes:
         logger.info("Loaded %s Excel price rows from %s", len(excel_prices), excel_name)
     mapping = parse_mapping(mapping_bytes, mapping_name)
     if mapping_bytes:
         logger.info("Loaded %s manual mapping rows from %s", len(mapping), mapping_name)
+    report_progress(progress_callback, "resolve_links", 0, max(1, len(skus)), "Preparing SKU links")
     resolved = resolve_skus(skus, mapping, live_lookup, fallback_search)
+    report_progress(progress_callback, "resolve_links", max(1, len(skus)), max(1, len(skus)), "SKU links prepared")
     logger.info("Resolved initial links for %s unique SKUs", len(skus))
     if website_prices:
         logger.info("Starting website price/link checks for %s detections", len(detections))
-        attach_price_comparisons(detections, resolved)
+        attach_price_comparisons(detections, resolved, progress_callback)
         logger.info("Finished website price/link checks")
     if excel_prices_enabled:
         logger.info("Starting Excel price comparisons")
-        attach_excel_comparisons(detections, excel_prices)
+        attach_excel_comparisons(detections, excel_prices, progress_callback)
         logger.info("Finished Excel price comparisons")
     if website_prices and excel_prices_enabled:
         logger.info("Starting triple price comparisons")
-        attach_triple_comparisons(detections)
+        attach_triple_comparisons(detections, progress_callback)
     else:
         mark_triple_not_checked(detections)
     if mode == "excel_prices":
@@ -156,12 +166,26 @@ def process_brochure(
     sanitize_resolved_links(resolved, skus)
     if link_annotations:
         logger.info("Applying grouped search links")
-        apply_grouped_search_links(groups, resolved, validate_counts=website_prices)
+        apply_grouped_search_links(
+            groups,
+            resolved,
+            validate_counts=website_prices,
+            progress_callback=progress_callback,
+        )
         logger.info("Finished grouped search links")
     update_from_price_display(detections)
-    linked_pdf, linked_count = write_links(pdf_bytes, pages, detections, resolved, debug_boxes, link_annotations)
+    linked_pdf, linked_count = write_links(
+        pdf_bytes,
+        pages,
+        detections,
+        resolved,
+        debug_boxes,
+        link_annotations,
+        progress_callback,
+    )
     logger.info("Wrote %s PDF link annotations", linked_count)
 
+    report_progress(progress_callback, "finalize", 0, 1, "Preparing results")
     rows = []
     for item in detections:
         link = resolved.get(item["sku"], {})
@@ -211,7 +235,7 @@ def process_brochure(
         len(linked_skus),
         price_different,
     )
-    return {
+    result = {
         "outputFileName": output_name(pdf_name),
         "pdfBase64": _to_base64(linked_pdf),
         "summary": {
@@ -238,6 +262,19 @@ def process_brochure(
         },
         "rows": rows,
     }
+    report_progress(progress_callback, "finalize", 1, 1, "Results ready")
+    return result
+
+
+def report_progress(
+    callback: ProgressCallback | None,
+    phase: str,
+    completed: int,
+    total: int,
+    detail: str = "",
+) -> None:
+    if callback is not None:
+        callback(phase, completed, total, detail)
 
 
 def legacy_mode(options: dict) -> str:
@@ -281,9 +318,15 @@ def select_processing_pages(pages: list[PageText], options: dict) -> tuple[list[
     raise ValueError("Choose whether to process the whole file, one page, or a page range.")
 
 
-def extract_text_pages(pdf_bytes: bytes, min_digits: int = 5, max_digits: int = 12) -> list[PageText]:
+def extract_text_pages(
+    pdf_bytes: bytes,
+    min_digits: int = 5,
+    max_digits: int = 12,
+    progress_callback: ProgressCallback | None = None,
+) -> list[PageText]:
     pages: list[PageText] = []
     with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        total_pages = len(pdf.pages)
         for index, page in enumerate(pdf.pages, start=1):
             raw_words = page.extract_words(x_tolerance=1, y_tolerance=3, keep_blank_chars=False, use_text_flow=False)
             words: list[Word] = []
@@ -314,6 +357,7 @@ def extract_text_pages(pdf_bytes: bytes, min_digits: int = 5, max_digits: int = 
                     find_large_image_blocks(page),
                 )
             )
+            report_progress(progress_callback, "extract_pdf", index, total_pages, f"Page {index} of {total_pages}")
     return pages
 
 
@@ -440,16 +484,26 @@ def detect_boxes(
     max_digits: int,
     box_padding: float,
     skip_last_page: bool = True,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[dict]:
     detections: list[dict] = []
     product_pages = pages[:-1] if skip_last_page and len(pages) > 1 else pages
-    for page in product_pages:
+    total_pages = len(product_pages)
+    report_progress(progress_callback, "detect_items", 0, max(1, total_pages), "Finding item cells")
+    for index, page in enumerate(product_pages, start=1):
         item_detections = detect_page_boxes(page, min_digits, max_digits, box_padding)
         item_detections, header_variants = expand_header_shorthand_groups(page, item_detections, min_digits, max_digits)
         variant_detections = detect_variant_table_rows(page, item_detections, min_digits, max_digits)
         variant_detections.extend(expand_variant_shorthand_rows(page, variant_detections, min_digits, max_digits))
         detections.extend(item_detections)
         detections.extend(dedupe_detections(header_variants + variant_detections))
+        report_progress(
+            progress_callback,
+            "detect_items",
+            index,
+            max(1, total_pages),
+            f"Page {page.page_number}: {len(detections)} SKUs found",
+        )
     return detections
 
 
@@ -2457,10 +2511,26 @@ def brochure_price_display_text(raw: str) -> str:
     return MISSING_BROCHURE_PRICE_TEXT if is_missing_brochure_price_text(raw) else str(raw or "")
 
 
-def attach_price_comparisons(detections: list[dict], resolved: dict[str, dict]) -> None:
+def attach_price_comparisons(
+    detections: list[dict],
+    resolved: dict[str, dict],
+    progress_callback: ProgressCallback | None = None,
+) -> None:
     checked: dict[str, dict] = {}
     unique_skus = sorted({item["sku"] for item in detections})
-    browser_results = compare_prices_with_playwright(unique_skus)
+    total_skus = max(1, len(unique_skus))
+    report_progress(progress_callback, "website_lookup", 0, total_skus, "Opening Praktis")
+    browser_results = compare_prices_with_playwright(
+        unique_skus,
+        lambda completed, total, detail: report_progress(
+            progress_callback,
+            "website_lookup",
+            completed,
+            max(1, total),
+            detail,
+        ),
+    )
+    report_progress(progress_callback, "website_lookup", total_skus, total_skus, "Website checks complete")
     search_fallback_blocked: dict | None = None
     for item in detections:
         sku = item["sku"]
@@ -2505,8 +2575,14 @@ def attach_price_comparisons(detections: list[dict], resolved: dict[str, dict]) 
             item["price_message"] = "Brochure and website prices are different."
 
 
-def attach_excel_comparisons(detections: list[dict], excel_prices: dict[str, dict]) -> None:
-    for item in detections:
+def attach_excel_comparisons(
+    detections: list[dict],
+    excel_prices: dict[str, dict],
+    progress_callback: ProgressCallback | None = None,
+) -> None:
+    total_steps = max(1, len(detections) * 2)
+    report_progress(progress_callback, "excel_compare", 0, total_steps, "Matching Excel prices")
+    for index, item in enumerate(detections, start=1):
         sku = item["sku"]
         excel_item = excel_prices.get(sku)
         if excel_item and excel_item.get("excel_price") is not None:
@@ -2514,11 +2590,14 @@ def attach_excel_comparisons(detections: list[dict], excel_prices: dict[str, dic
             item["excel_row"] = excel_item.get("excel_row")
         else:
             item["excel_price"] = None
+        if index % 25 == 0 or index == len(detections):
+            report_progress(progress_callback, "excel_compare", index, total_steps, f"SKU {index} of {len(detections)}")
 
     apply_from_price_selection(detections, "excel_price", "excel_from_price_candidate")
     update_from_price_display(detections)
 
-    for item in detections:
+    offset = len(detections)
+    for index, item in enumerate(detections, start=1):
         brochure_price, not_defined = comparison_brochure_price(item, "excel_from_price_candidate")
         if not_defined:
             item["excel_status"] = undefined_brochure_price_status(item)
@@ -2531,11 +2610,24 @@ def attach_excel_comparisons(detections: list[dict], excel_prices: dict[str, dic
             )
             item["excel_status"] = status
             item["excel_message"] = message
+        if index % 25 == 0 or index == len(detections):
+            report_progress(
+                progress_callback,
+                "excel_compare",
+                offset + index,
+                total_steps,
+                f"Compared {index} of {len(detections)} SKUs",
+            )
 
 
-def attach_triple_comparisons(detections: list[dict]) -> None:
+def attach_triple_comparisons(
+    detections: list[dict],
+    progress_callback: ProgressCallback | None = None,
+) -> None:
     update_from_price_display(detections)
-    for item in detections:
+    total = max(1, len(detections))
+    report_progress(progress_callback, "triple_compare", 0, total, "Comparing all price sources")
+    for index, item in enumerate(detections, start=1):
         brochure_price, not_defined = triple_brochure_price(item)
         website_price = item.get("website_price") or None
         excel_price = item.get("excel_price")
@@ -2558,6 +2650,8 @@ def attach_triple_comparisons(detections: list[dict]) -> None:
         else:
             item["triple_status"] = "different"
             item["triple_message"] = "At least one of brochure, website, or Excel price is different."
+        if index % 25 == 0 or index == len(detections):
+            report_progress(progress_callback, "triple_compare", index, total, f"Compared {index} of {len(detections)} SKUs")
 
 
 def apply_from_price_selection(detections: list[dict], source_price_key: str, selection_key: str) -> None:
@@ -2725,10 +2819,13 @@ def apply_grouped_search_links(
     groups: list[dict],
     resolved: dict[str, dict],
     validate_counts: bool,
+    progress_callback: ProgressCallback | None = None,
 ) -> None:
     prepared: list[dict] = []
+    planned_total = max(1, len(groups) * (2 if validate_counts else 1))
+    report_progress(progress_callback, "group_links", 0, planned_total, "Preparing complex links")
     logger.info("Preparing grouped search links: groups=%s validate=%s", len(groups), validate_counts)
-    for group in groups:
+    for group_index, group in enumerate(groups, start=1):
         skus = group["skus"]
         parent = group["parent"]
         titles = group_website_titles(skus, resolved)
@@ -2744,6 +2841,7 @@ def apply_grouped_search_links(
                 ",".join(skus),
                 len(titles),
             )
+            report_progress(progress_callback, "group_links", group_index, planned_total, f"Group {group_index} of {len(groups)}")
             continue
 
         try:
@@ -2759,6 +2857,7 @@ def apply_grouped_search_links(
                 parent["sku"],
                 ",".join(skus),
             )
+            report_progress(progress_callback, "group_links", group_index, planned_total, f"Group {group_index} of {len(groups)}")
             continue
 
         logger.info(
@@ -2768,12 +2867,22 @@ def apply_grouped_search_links(
             query,
         )
         prepared.append({"group": group, "skus": skus, "parent": parent, "url": url, "query": query})
+        report_progress(progress_callback, "group_links", group_index, planned_total, f"Group {group_index} of {len(groups)}")
 
     count_results: dict[str, dict] = {}
     if validate_counts and prepared:
         validation_requests = {item["url"]: item["skus"] for item in prepared}
         logger.info("Validating grouped search links with browser: links=%s", len(validation_requests))
-        count_results = count_search_results_with_playwright(validation_requests)
+        count_results = count_search_results_with_playwright(
+            validation_requests,
+            lambda completed, total, detail: report_progress(
+                progress_callback,
+                "group_links",
+                len(groups) + completed,
+                max(1, len(groups) + total),
+                detail,
+            ),
+        )
         urls = list(validation_requests)
         for url in urls:
             result = count_results.get(url, {})
@@ -2868,6 +2977,9 @@ def apply_grouped_search_links(
             "group_missing_skus": missing_skus,
             "group_extra_skus": extra_skus,
         }
+
+    final_total = max(1, len(groups) + (len(prepared) if validate_counts else 0))
+    report_progress(progress_callback, "group_links", final_total, final_total, "Complex links ready")
 
 
 def mark_group_title_missing(parent: dict, resolved: dict[str, dict], message: str) -> None:
@@ -2982,9 +3094,12 @@ def write_links(
     resolved: dict[str, dict],
     debug_boxes: bool,
     link_annotations: bool = True,
+    progress_callback: ProgressCallback | None = None,
 ) -> tuple[bytes, int]:
     reader = PdfReader(BytesIO(pdf_bytes))
     writer = PdfWriter()
+    total_steps = max(1, len(reader.pages) + len(detections))
+    report_progress(progress_callback, "write_pdf", 0, total_steps, "Building output PDF")
 
     overlays = build_debug_overlay(pages, detections) if debug_boxes else None
     overlay_reader = PdfReader(BytesIO(overlays)) if overlays else None
@@ -2993,10 +3108,20 @@ def write_links(
         writer.add_page(source_page)
         if overlay_reader is not None:
             writer.pages[index].merge_page(overlay_reader.pages[index])
+        report_progress(progress_callback, "write_pdf", index + 1, total_steps, f"Copied page {index + 1} of {len(reader.pages)}")
 
     linked_count = 0
     page_heights = {page.page_number: page.height for page in pages}
-    for item in detections:
+    page_steps = len(reader.pages)
+    for item_index, item in enumerate(detections, start=1):
+        if item_index % 25 == 0 or item_index == len(detections):
+            report_progress(
+                progress_callback,
+                "write_pdf",
+                page_steps + item_index,
+                total_steps,
+                f"Link {item_index} of {len(detections)}",
+            )
         if not link_annotations or not item.get("linkable", True):
             continue
         link = resolved.get(item["sku"], {})
@@ -3016,6 +3141,7 @@ def write_links(
 
     out = BytesIO()
     writer.write(out)
+    report_progress(progress_callback, "write_pdf", total_steps, total_steps, "Output PDF ready")
     return out.getvalue(), linked_count
 
 
