@@ -198,6 +198,17 @@ docker compose logs -f uptime-kuma
 
 ## Notes
 
+Before changing PDF geometry, SKU shorthand, variant-table, or price parsing logic, read
+[`tests/REGRESSION_CASES.md`](tests/REGRESSION_CASES.md) and
+[`docs/PDF_PARSER_CONTRACT.md`](docs/PDF_PARSER_CONTRACT.md), then run:
+
+```bash
+python -m unittest discover -s tests -v
+node --test tests/status.test.mjs
+```
+
+Each newly fixed brochure bug should add a minimized regression test and an entry in the regression ledger.
+
 The app can create useful search links even if Praktis blocks automated product
 page verification.
 

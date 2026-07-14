@@ -795,6 +795,18 @@ tbody tr:last-child td {
   line-height: 1.15;
 }
 
+.status-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.status-badges .badge {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .badge.mapped,
 .badge.linked,
 .badge.match,
@@ -811,6 +823,7 @@ tbody tr:last-child td {
 .badge.price_only,
 .badge.repeating_item,
 .badge.price_box_error,
+.badge.unit_mismatch,
 .badge.promotion_percent_error,
 .badge.table_header_error,
 .badge.sku_illustration_error,

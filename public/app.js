@@ -1,3 +1,5 @@
+import { getStatusValues } from "./status.js";
+
 const form = document.querySelector("#processForm");
 const pdfInput = document.querySelector("#pdfInput");
 const pdfLabel = document.querySelector("#pdfLabel");
@@ -61,7 +63,8 @@ const labels = {
   link_not_found: "Линк не е намерен",
   price_only: "Само цена",
   repeating_item: "Повтарящ се код",
-  price_box_error: "Грешка цена",
+  price_box_error: "Грешка в конвертиране цена",
+  unit_mismatch: "Грешна мерна единица",
   promotion_percent_error: "Грешен % промо",
   table_header_error: "Грешка в таблица",
   sku_illustration_error: "Грешка в група кодове",
@@ -593,11 +596,11 @@ function renderRows() {
 }
 
 function rowToHtml(row) {
-  const status = getStatusValue(row);
   const priceStatus = getChoiceStatusValue(row, "price_status");
   const excelStatus = getChoiceStatusValue(row, "excel_status");
   const tripleStatus = getChoiceStatusValue(row, "triple_status");
   const displayMessage = translateMessage(row.message || "");
+  const statusMessage = [displayMessage, translateMessage(row.unit_message || "")].filter(Boolean).join(" ");
   const url = row.url
     ? `<a href="${escapeAttr(row.url)}" target="_blank" rel="noreferrer">${escapeHtml(row.title || row.url)}</a>`
     : `<span>${escapeHtml(displayMessage || "Няма линк")}</span>`;
@@ -607,7 +610,7 @@ function rowToHtml(row) {
       <td>${row.page}</td>
       <td>${escapeHtml(row.sku)}</td>
       <td>${escapeHtml(row.parent_sku || "")}</td>
-      <td>${badgeHtml(status)}</td>
+      <td title="${escapeAttr(statusMessage)}">${statusBadgesHtml(row)}</td>
       <td>${escapeHtml(labels[row.box_type] || row.box_type)}</td>
       <td>${formatBrochurePrice(row)}</td>
       <td>${formatPrice(row.website_price)}</td>
@@ -632,7 +635,11 @@ function getVisibleRows() {
   for (const key of choiceFilterKeys) {
     const selected = tableState.filters[key];
     if (selected) {
-      rows = rows.filter((row) => selected.has(getFilterValue(row, key)));
+      rows = rows.filter((row) =>
+        key === "status"
+          ? getStatusValues(row).some((value) => selected.has(value))
+          : selected.has(getFilterValue(row, key))
+      );
     }
   }
 
@@ -731,7 +738,11 @@ function renderColumnMenu(key, keepFocus = false) {
 
 function getAllFilterValues(key) {
   const rows = lastResult?.rows || [];
-  const values = new Set(rows.map((row) => getFilterValue(row, key)));
+  const values = new Set(
+    key === "status"
+      ? rows.flatMap((row) => getStatusValues(row))
+      : rows.map((row) => getFilterValue(row, key))
+  );
   return [...values].sort((left, right) =>
     getFilterLabel(key, left).localeCompare(getFilterLabel(key, right), undefined, { sensitivity: "base" })
   );
@@ -791,6 +802,10 @@ function badgeHtml(value) {
   return `<span class="badge ${escapeAttr(value)}">${escapeHtml(labels[value] || value)}</span>`;
 }
 
+function statusBadgesHtml(row) {
+  return `<div class="status-badges">${getStatusValues(row).map((value) => badgeHtml(value)).join("")}</div>`;
+}
+
 function translateMessage(message) {
   const text = String(message || "");
   if (!text) return "";
@@ -805,6 +820,8 @@ function translateMessage(message) {
     "Brochure and website prices are different.": "Цените от PDF и сайта са различни.",
     "Brochure and Excel prices match.": "Цените от PDF и Excel съвпадат.",
     "Brochure and Excel prices are different.": "Цените от PDF и Excel са различни.",
+    "Measure unit was not available in the brochure data.": "В PDF липсва мерна единица.",
+    "Measure unit was not available in the Excel data.": "В Excel липсва мерна единица.",
     "Brochure, website, and Excel prices match.": "Цените от PDF, сайта и Excel съвпадат.",
     "At least one of brochure, website, or Excel price is different.": "Поне една от цените в PDF, сайта или Excel е различна.",
     "Triple price check was not selected.": "Тройната проверка не е избрана.",
@@ -819,7 +836,9 @@ function translateMessage(message) {
     .replace("Praktis/Cloudflare blocked the browser price lookup.", "Praktis/Cloudflare блокира проверката през браузъра.")
     .replace("Praktis/Cloudflare blocked grouped search validation.", "Praktis/Cloudflare блокира проверката на груповото търсене.")
     .replace("Brochure shows a 'from' price; exact SKU price is not defined.", "В PDF има цена „от“; точната цена за този код не е дефинирана.")
-    .replace("Brochure shows a 'from' price; only the lowest priced SKU in this item box is compared.", "В PDF има цена „от“; сравнява се само кодът с най-ниската цена в това поле.");
+    .replace("Brochure shows a 'from' price; only the lowest priced SKU in this item box is compared.", "В PDF има цена „от“; сравнява се само кодът с най-ниската цена в това поле.")
+    .replace("Measure units match:", "Мерните единици съвпадат:")
+    .replace("Measure unit differs: brochure", "Грешна мерна единица: PDF");
 }
 
 function toXlsxBlob(rows) {
@@ -897,8 +916,14 @@ function excelCellForColumn(key, columnIndex, rowNumber, row) {
     return numberCell(column, rowNumber, row[key], 3);
   }
   if (key === "status") {
-    const status = getStatusValue(row);
-    return cell(column, rowNumber, labels[status] || status, excelStatusStyle(status));
+    const statuses = getStatusValues(row);
+    const styleStatus = statuses.includes("unit_mismatch") ? "unit_mismatch" : statuses[0];
+    return cell(
+      column,
+      rowNumber,
+      statuses.map((status) => labels[status] || status).join(" | "),
+      excelStatusStyle(styleStatus)
+    );
   }
   if (["price_status", "excel_status", "triple_status"].includes(key)) {
     const status = getChoiceStatusValue(row, key);

@@ -31,12 +31,14 @@ def parse_excel_prices(data: bytes | None, filename: str = "") -> dict[str, dict
         sku = normalize_sku(values.get("M"))
         price = parse_price(values.get("U"))
         name = normalize_name(values.get("N"))
+        unit = normalize_measure_unit(values.get("O"))
         if not sku or (price is None and not name):
             continue
         prices[sku] = {
             "sku": sku,
             "excel_price": price,
             "excel_name": name,
+            "excel_unit": unit,
             "excel_row": row_number,
         }
 
@@ -98,6 +100,49 @@ def normalize_sku(value: object) -> str:
 
 def normalize_name(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def normalize_measure_unit(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return ""
+
+    compact = re.sub(r"[^0-9a-zа-я]+", "", text.replace("²", "2"))
+    aliases = {
+        "бр": "бр",
+        "брой": "бр",
+        "броя": "бр",
+        "br": "бр",
+        "pcs": "бр",
+        "квм": "кв.м",
+        "м2": "кв.м",
+        "m2": "кв.м",
+        "sqm": "кв.м",
+        "линм": "л.м",
+        "лм": "л.м",
+        "lm": "л.м",
+        "кг": "кг",
+        "килограм": "кг",
+        "килограма": "кг",
+        "kg": "кг",
+        "л": "л",
+        "литър": "л",
+        "литра": "л",
+        "l": "л",
+        "м": "м",
+        "метър": "м",
+        "метра": "м",
+        "m": "м",
+        "см": "см",
+        "cm": "см",
+        "кт": "комплект",
+        "комплект": "комплект",
+        "пак": "пакет",
+        "пакет": "пакет",
+        "руло": "руло",
+        "мярка": "мярка",
+    }
+    return aliases.get(compact, compact)
 
 
 def parse_price(value: object) -> float | None:

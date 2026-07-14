@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from io import BytesIO
 import logging
 import math
@@ -13,7 +14,7 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.annotations import Link
 from reportlab.pdfgen import canvas
 
-from .excel_prices import parse_excel_prices
+from .excel_prices import normalize_measure_unit, parse_excel_prices
 from .grouped_search import make_group_search_url_from_titles
 from .logging_config import configure_logging
 from .mapping import parse_mapping
@@ -69,10 +70,12 @@ HEADER_PRICE_BOX_PADDING = 6.5
 HEADER_PAGE_EDGE_TOLERANCE = 18.0
 HEADER_EDGE_TOUCH_TOLERANCE = 6.0
 HEADER_PRICE_GROUP_GAP = 68.0
+HEADER_CENTS_MAX_GAP = 18.0
 BGN_PER_EUR = 1.95583
 MAX_SHORTHAND_RANGE_ITEMS = 60
 UNDEFINED_BROCHURE_PRICE_TEXT = "Not defined"
 MISSING_BROCHURE_PRICE_TEXT = "?"
+KNOWN_MEASURE_UNITS = {"бр", "кв.м", "л.м", "кг", "л", "м", "см", "комплект", "пакет", "руло", "мярка"}
 logger = logging.getLogger(__name__)
 ProgressCallback = Callable[[str, int, int, str], None]
 
@@ -195,6 +198,7 @@ def process_brochure(
                 "sku": item["sku"],
                 "parent_sku": item.get("parent_sku", ""),
                 "status": item.get("status") or link.get("status", "unresolved"),
+                "status_flags": item.get("status_flags", []),
                 "box_type": item["box_type"],
                 "url": link.get("url", ""),
                 "title": link.get("title", ""),
@@ -208,6 +212,10 @@ def process_brochure(
                 "excel_price": item.get("excel_price"),
                 "excel_status": item.get("excel_status", ""),
                 "excel_message": item.get("excel_message", ""),
+                "brochure_unit": item.get("brochure_unit", ""),
+                "excel_unit": item.get("excel_unit", ""),
+                "unit_status": item.get("unit_status", ""),
+                "unit_message": item.get("unit_message", ""),
                 "triple_status": item.get("triple_status", ""),
                 "triple_message": item.get("triple_message", ""),
                 "confidence": item["confidence"],
@@ -648,6 +656,7 @@ def shorthand_variant_detection(
         brochure_price_from_marker=bool(source.get("brochure_price_from_marker")),
         from_price_text=price_text if price_not_defined else "",
         from_price=price if price_not_defined else None,
+        brochure_unit=source.get("brochure_unit", ""),
     )
 
 
@@ -662,7 +671,12 @@ def detection_sku_expression(page: PageText, item: dict, header: bool) -> str:
     if header:
         bottom = min(box["y"] + box["height"], max(box["y"] + 28, find_detection_price_bottom(page, item)))
     else:
-        bottom = box["y"] + min(box["height"], 12)
+        sku_word = find_detection_sku_word(page, item)
+        if sku_word:
+            top = max(0.0, sku_word.top - 1.5)
+            bottom = min(page.height, sku_word.bottom + 1.5)
+        else:
+            bottom = box["y"] + min(box["height"], 12)
 
     lines = sku_expression_lines(page, left, right, top, bottom, allow_overflow_original=header)
     return " ".join(lines)
@@ -1320,7 +1334,11 @@ def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padd
                 "width": clamp(next_x - x + box_padding, 8, page.width - x),
                 "height": clamp(row_end - row_start + box_padding * 2, 8, page.height - row_start),
             }
-            brochure_price_text, brochure_price, brochure_price_from_marker = find_brochure_price(page, box, word)
+            brochure_price_text, brochure_price, brochure_price_from_marker, brochure_unit = find_brochure_price(
+                page,
+                box,
+                word,
+            )
             detections.append(
                 _detection(
                     page,
@@ -1332,6 +1350,7 @@ def detect_page_boxes(page: PageText, min_digits: int, max_digits: int, box_padd
                     brochure_price,
                     brochure_price_not_defined=is_missing_brochure_price_text(brochure_price_text),
                     brochure_price_from_marker=brochure_price_from_marker,
+                    brochure_unit=brochure_unit,
                 )
             )
 
@@ -1371,7 +1390,7 @@ def detect_variant_table_rows(
         if is_after_comma_continuation(page, word, min_digits, max_digits):
             continue
 
-        line = same_line_words(page, word, max(3.0, word.height * 0.9))
+        line = table_row_words(page, word)
         if is_overlapped_price_noise(word, line) and not has_nearby_code_column_header(page, word):
             continue
         right_limit = min(
@@ -1425,10 +1444,16 @@ def detect_variant_table_rows(
                 status="table_header_error" if table_issue else "",
                 message=table_issue,
                 brochure_price_not_defined=is_missing_brochure_price_text(chosen[3]),
+                brochure_unit=measure_unit_from_price_header(price_window.get("first_header", "")),
             )
         )
 
     return dedupe_detections(variants)
+
+
+def table_row_words(page: PageText, sku_word: Word) -> list[Word]:
+    tolerance = max(2.2, min(3.0, sku_word.height * 0.55))
+    return same_line_words(page, sku_word, tolerance)
 
 
 def table_price_candidates(line: list[Word], left: float, right: float) -> list[tuple[float, float, float, str]]:
@@ -1575,8 +1600,8 @@ def find_table_price_window(page: PageText, sku_word: Word, right_limit: float) 
         if right > left + 4:
             return {
                 "euro_window": (left, right),
-                "first_header": first_header.text,
-                "second_header": second_header.text if second_header else "",
+                "first_header": joined_price_header_text(page, first_header),
+                "second_header": joined_price_header_text(page, second_header) if second_header else "",
                 "second_window": (
                     second_header.x0 - 2,
                     min(right_limit, second_header.x1 + 42),
@@ -1878,8 +1903,14 @@ def detect_header_driven_boxes(
                 else page.width
             )
             if is_variant_table_sku_word(page, word, min_digits, max_digits):
+                if has_variant_table_price_on_row(page, word, min_digits, max_digits):
+                    continue
                 direct_price_word = find_direct_header_price_word(page, word, right_edge)
-                if direct_price_word and word.comma_primary:
+                if direct_price_word and word.comma_primary and not has_item_price_header_on_sku_line(
+                    page,
+                    word,
+                    right_edge,
+                ):
                     continue
                 if direct_price_word:
                     price_word = direct_price_word
@@ -1919,8 +1950,8 @@ def detect_header_driven_boxes(
         headers.extend(row_headers)
 
     primary_candidates = [word for word in candidates if not word.fragment]
-    has_top_page_header = len(headers) == 1 and headers[0]["top"] <= 24
-    if len(headers) < 3 and not (len(headers) == 1 and len(primary_candidates) == 1) and not has_top_page_header:
+    has_top_page_headers = 1 <= len(headers) <= 2 and all(header["top"] <= 24 for header in headers)
+    if len(headers) < 3 and not (len(headers) == 1 and len(primary_candidates) == 1) and not has_top_page_headers:
         return []
 
     headers.sort(key=lambda item: (item["top"], item["left"]))
@@ -1952,6 +1983,7 @@ def detect_header_driven_boxes(
                 message=price_box_issue,
                 brochure_price_not_defined=is_missing_brochure_price_text(price_text),
                 brochure_price_from_marker=price_from_marker,
+                brochure_unit=find_item_brochure_unit(page, box, header["price_word"]),
             )
         )
 
@@ -2008,6 +2040,37 @@ def is_variant_table_sku_word(page: PageText, word: Word, min_digits: int, max_d
         or [page.width]
     )
     return find_table_price_window(page, word, right_limit) is not None
+
+
+def has_variant_table_price_on_row(page: PageText, word: Word, min_digits: int, max_digits: int) -> bool:
+    line = table_row_words(page, word)
+    right_limit = min(
+        [
+            other.x0
+            for other in line
+            if other is not word
+            and other.x0 > word.x1 + 8
+            and is_sku(other.text, min_digits, max_digits)
+        ]
+        or [page.width]
+    )
+    price_window = find_table_price_window(page, word, right_limit)
+    if not price_window:
+        return False
+    euro_left, euro_right = price_window["euro_window"]
+    return any(
+        euro_left <= candidate[0] and candidate[1] <= euro_right
+        for candidate in table_price_candidates(line, word.x1 + 8, right_limit)
+    )
+
+
+def has_item_price_header_on_sku_line(page: PageText, sku_word: Word, right_edge: float) -> bool:
+    return any(
+        (is_euro_header(word.text) or is_leva_header(word.text))
+        and sku_word.x1 + 4 <= word.x0 < right_edge
+        and abs(word.mid_y - sku_word.mid_y) <= 6
+        for word in page.words
+    )
 
 
 def is_sku_range_continuation(page: PageText, word: Word, row: list[Word]) -> bool:
@@ -2068,7 +2131,7 @@ def find_split_header_price_words(page: PageText, sku_word: Word, right_edge: fl
             for cents in digits
             if cents is not whole
             and len(cents.text) == 2
-            and -2 <= cents.x0 - whole.x1 <= 60
+            and -2 <= cents.x0 - whole.x1 <= HEADER_CENTS_MAX_GAP
             and abs(cents.mid_y - whole.mid_y) <= 18
             and cents.x0 < right_edge - 1
         ]
@@ -2357,7 +2420,7 @@ def same_line_words(page: PageText, word: Word, tolerance: float) -> list[Word]:
     return sorted([other for other in page.words if abs(other.mid_y - word.mid_y) <= tolerance], key=lambda item: item.x0)
 
 
-def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str, float | None, bool]:
+def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str, float | None, bool, str]:
     top_limit = box["y"] - 2
     bottom_limit = min(box["y"] + 78, sku_word.bottom + 18)
     left = box["x"]
@@ -2379,12 +2442,74 @@ def find_brochure_price(page: PageText, box: dict, sku_word: Word) -> tuple[str,
         candidates.append(word)
 
     if not candidates:
-        return "", None, False
+        return "", None, False, ""
 
     candidates.sort(key=lambda item: (abs(item.top - sku_word.top), -item.height))
     price_word = candidates[0]
     raw = price_word.text
-    return brochure_price_display_text(raw), brochure_price_to_decimal(raw), has_from_price_marker(page, box, price_word)
+    return (
+        brochure_price_display_text(raw),
+        brochure_price_to_decimal(raw),
+        has_from_price_marker(page, box, price_word),
+        find_item_brochure_unit(page, box, price_word),
+    )
+
+
+def find_item_brochure_unit(page: PageText, box: dict, price_word: Word) -> str:
+    candidates = [
+        word
+        for word in page.words
+        if is_euro_header(word.text)
+        and box["x"] - 4 <= word.x0 <= box["x"] + box["width"] + 4
+        and price_word.top - 30 <= word.top <= price_word.bottom + 3
+        and abs(word.x0 - price_word.x0) <= 36
+    ]
+    for header in sorted(candidates, key=lambda word: (abs(word.x0 - price_word.x0), abs(word.bottom - price_word.top))):
+        unit = measure_unit_from_price_header(joined_price_header_text(page, header))
+        if unit:
+            return unit
+        unit = measure_unit_from_price_header(header.text)
+        if unit:
+            return unit
+    return ""
+
+
+def joined_price_header_text(page: PageText, header: Word) -> str:
+    if measure_unit_from_price_header(header.text) in KNOWN_MEASURE_UNITS:
+        return header.text
+
+    followers = sorted(
+        [
+        word
+        for word in page.words
+        if header.x1 - 1 <= word.x0 <= header.x1 + 18
+        and abs(word.mid_y - header.mid_y) <= 3
+        and not is_leva_header(word.text)
+        ],
+        key=lambda word: word.x0,
+    )
+    text = header.text
+    cursor = header.x1
+    for follower in followers:
+        token = follower.text.strip()
+        if follower.x0 > cursor + 1.5:
+            break
+        if "/" in token or any(character.isdigit() for character in token):
+            break
+        if not any(character.isalpha() for character in token):
+            continue
+        text += token
+        cursor = max(cursor, follower.x1)
+        if token.endswith("."):
+            break
+    return text
+
+
+def measure_unit_from_price_header(text: str) -> str:
+    raw = str(text or "").strip()
+    if "/" not in raw:
+        return ""
+    return normalize_measure_unit(raw.split("/", 1)[1])
 
 
 def has_from_price_marker(page: PageText, box: dict, price_word: Word) -> bool:
@@ -2585,6 +2710,7 @@ def attach_excel_comparisons(
     for index, item in enumerate(detections, start=1):
         sku = item["sku"]
         excel_item = excel_prices.get(sku)
+        item["excel_unit"] = excel_item.get("excel_unit", "") if excel_item else ""
         if excel_item and excel_item.get("excel_price") is not None:
             item["excel_price"] = excel_item["excel_price"]
             item["excel_row"] = excel_item.get("excel_row")
@@ -2610,6 +2736,14 @@ def attach_excel_comparisons(
             )
             item["excel_status"] = status
             item["excel_message"] = message
+        item["unit_status"], item["unit_message"] = compare_measure_units(
+            item.get("brochure_unit", ""),
+            item.get("excel_unit", ""),
+        )
+        if item["unit_status"] == "unit_mismatch":
+            flags = item.setdefault("status_flags", [])
+            if "unit_mismatch" not in flags:
+                flags.append("unit_mismatch")
         if index % 25 == 0 or index == len(detections):
             report_progress(
                 progress_callback,
@@ -2618,6 +2752,36 @@ def attach_excel_comparisons(
                 total_steps,
                 f"Compared {index} of {len(detections)} SKUs",
             )
+
+
+def compare_measure_units(brochure_unit: str, excel_unit: str) -> tuple[str, str]:
+    brochure = normalize_measure_unit(brochure_unit)
+    excel = normalize_measure_unit(excel_unit)
+    if not brochure or not excel:
+        missing = "brochure" if not brochure else "Excel"
+        return "not_checked", f"Measure unit was not available in the {missing} data."
+    if measure_units_similar(brochure, excel):
+        return "match", f"Measure units match: {brochure}."
+    return "unit_mismatch", f"Measure unit differs: brochure {brochure}; Excel {excel}."
+
+
+def measure_units_similar(left: str, right: str) -> bool:
+    left_letters = measure_unit_letter_key(left)
+    right_letters = measure_unit_letter_key(right)
+    if not left_letters or not right_letters:
+        return False
+    if left_letters == right_letters:
+        return True
+    if min(len(left_letters), len(right_letters)) < 2:
+        return False
+    if left_letters[0] != right_letters[0]:
+        return False
+    return SequenceMatcher(None, left_letters, right_letters).ratio() >= 0.8
+
+
+def measure_unit_letter_key(value: str) -> str:
+    canonical = normalize_measure_unit(value)
+    return "".join(character for character in canonical.casefold() if character.isalpha())
 
 
 def attach_triple_comparisons(
@@ -3224,6 +3388,7 @@ def _detection(
     brochure_price_from_marker: bool = False,
     from_price_text: str = "",
     from_price: float | None = None,
+    brochure_unit: str = "",
 ) -> dict:
     if brochure_price_from_marker and from_price is None:
         from_price = brochure_price
@@ -3241,6 +3406,7 @@ def _detection(
         "brochure_price_from_marker": brochure_price_from_marker,
         "from_price_text": from_price_text,
         "from_price": from_price,
+        "brochure_unit": brochure_unit,
         "linkable": linkable,
         "status": status,
         "message": message,
