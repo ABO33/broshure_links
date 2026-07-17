@@ -1,0 +1,42 @@
+{
+  "expo": {
+    "name": "Movie Tracker",
+    "slug": "movie-tracker",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "movietracker",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.example.movietracker"
+    },
+    "android": {
+      "package": "com.example.movietracker",
+      "adaptiveIcon": {
+        "backgroundColor": "#11131A"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#11131A",
+          "dark": {
+            "backgroundColor": "#11131A"
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

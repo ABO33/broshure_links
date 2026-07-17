@@ -1,0 +1,18 @@
+{
+  "name": "movie-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/mobile"
+  ],
+  "scripts": {
+    "mobile:start": "npm --workspace @movie-tracker/mobile start",
+    "mobile:lint": "npm --workspace @movie-tracker/mobile run lint",
+    "mobile:format": "npm --workspace @movie-tracker/mobile run format:check",
+    "mobile:typecheck": "npm --workspace @movie-tracker/mobile run typecheck",
+    "mobile:test": "npm --workspace @movie-tracker/mobile test"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}
