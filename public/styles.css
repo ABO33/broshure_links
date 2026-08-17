@@ -830,6 +830,7 @@ tbody tr:last-child td {
 .badge.group_title_missing,
 .badge.group_count_mismatch,
 .badge.group_count_unknown,
+.badge.group_category_review,
 .badge.no_url,
 .badge.no_brochure_price,
 .badge.brochure_price_missing,

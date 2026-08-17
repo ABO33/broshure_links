@@ -15,10 +15,14 @@ from pypdf.annotations import Link
 from reportlab.pdfgen import canvas
 
 from .excel_prices import normalize_measure_unit, parse_excel_prices
-from .grouped_search import make_group_search_url_from_titles
+from .grouped_search import make_category_sale_url, make_group_search_url_from_titles
 from .logging_config import configure_logging
 from .mapping import parse_mapping
-from .praktis_playwright import compare_prices_with_playwright, count_search_results_with_playwright
+from .praktis_playwright import (
+    compare_prices_with_playwright,
+    count_search_results_with_playwright,
+    find_product_categories_with_playwright,
+)
 from .resolver import compare_website_price, count_search_results, resolve_skus, search_url_for_sku
 
 
@@ -2986,7 +2990,8 @@ def apply_grouped_search_links(
     progress_callback: ProgressCallback | None = None,
 ) -> None:
     prepared: list[dict] = []
-    planned_total = max(1, len(groups) * (2 if validate_counts else 1))
+    fallback_candidates: list[dict] = []
+    planned_total = max(1, len(groups) * (3 if validate_counts else 1))
     report_progress(progress_callback, "group_links", 0, planned_total, "Preparing complex links")
     logger.info("Preparing grouped search links: groups=%s validate=%s", len(groups), validate_counts)
     for group_index, group in enumerate(groups, start=1):
@@ -2994,11 +2999,13 @@ def apply_grouped_search_links(
         parent = group["parent"]
         titles = group_website_titles(skus, resolved)
         if len(titles) < 2:
-            mark_group_title_missing(
-                parent,
-                resolved,
-                "Grouped product-name link was not created because product titles were not available.",
-            )
+            message = "Grouped product-name link was not created because product titles were not available."
+            if validate_counts:
+                fallback_candidates.append(
+                    group_fallback_candidate(group, "group_title_missing", message)
+                )
+            else:
+                mark_group_title_missing(parent, resolved, message)
             logger.info(
                 "Skipping grouped search link without enough website titles: parent=%s skus=%s titles=%s",
                 parent["sku"],
@@ -3011,11 +3018,13 @@ def apply_grouped_search_links(
         try:
             url, query = make_group_search_url_from_titles(titles)
         except ValueError:
-            mark_group_title_missing(
-                parent,
-                resolved,
-                "Grouped product-name link could not be built from the product titles.",
-            )
+            message = "Grouped product-name link could not be built from the product titles."
+            if validate_counts:
+                fallback_candidates.append(
+                    group_fallback_candidate(group, "group_title_missing", message)
+                )
+            else:
+                mark_group_title_missing(parent, resolved, message)
             logger.warning(
                 "Could not build grouped title query: parent=%s skus=%s",
                 parent["sku"],
@@ -3124,10 +3133,7 @@ def apply_grouped_search_links(
                     message,
                 )
 
-        existing = resolved.get(parent["sku"], {})
-        resolved[parent["sku"]] = {
-            **existing,
-            "sku": parent["sku"],
+        group_result = {
             "status": status,
             "source": "grouped-search",
             "url": url,
@@ -3141,9 +3147,172 @@ def apply_grouped_search_links(
             "group_missing_skus": missing_skus,
             "group_extra_skus": extra_skus,
         }
+        if validate_counts and status != "grouped_search":
+            fallback_candidates.append(
+                group_fallback_candidate(
+                    item["group"],
+                    status,
+                    message,
+                    failed_result=group_result,
+                )
+            )
+            continue
+        store_group_link_result(parent, resolved, group_result)
 
-    final_total = max(1, len(groups) + (len(prepared) if validate_counts else 0))
-    report_progress(progress_callback, "group_links", final_total, final_total, "Complex links ready")
+    if validate_counts and fallback_candidates:
+        apply_group_category_fallbacks(
+            fallback_candidates,
+            resolved,
+            progress_callback,
+            len(groups) + len(prepared),
+            planned_total,
+        )
+
+    report_progress(progress_callback, "group_links", planned_total, planned_total, "Complex links ready")
+
+
+def group_fallback_candidate(
+    group: dict,
+    failed_status: str,
+    failed_message: str,
+    failed_result: dict | None = None,
+) -> dict:
+    return {
+        "group": group,
+        "parent": group["parent"],
+        "skus": group["skus"],
+        "failed_status": failed_status,
+        "failed_message": failed_message,
+        "failed_result": failed_result,
+    }
+
+
+def store_group_link_result(parent: dict, resolved: dict[str, dict], result: dict) -> None:
+    sku = parent["sku"]
+    resolved[sku] = {
+        **resolved.get(sku, {}),
+        "sku": sku,
+        **result,
+    }
+
+
+def apply_group_category_fallbacks(
+    candidates: list[dict],
+    resolved: dict[str, dict],
+    progress_callback: ProgressCallback | None,
+    progress_offset: int,
+    progress_total: int,
+) -> None:
+    lookup_requests: dict[str, str] = {}
+    for candidate in candidates:
+        sku = candidate["parent"]["sku"]
+        existing = resolved.get(sku, {})
+        if existing.get("category_url"):
+            continue
+        product_url = parent_product_url_for_category(existing)
+        if product_url:
+            lookup_requests[sku] = product_url
+
+    category_results = find_product_categories_with_playwright(
+        lookup_requests,
+        lambda completed, total, detail: report_progress(
+            progress_callback,
+            "group_links",
+            min(progress_total, progress_offset + completed),
+            progress_total,
+            detail,
+        ),
+    ) if lookup_requests else {}
+
+    for sku, category_result in category_results.items():
+        if category_result.get("category_status") != "ok":
+            continue
+        resolved[sku] = {
+            **resolved.get(sku, {}),
+            "category_url": category_result.get("category_url", ""),
+            "category_title": category_result.get("category_title", ""),
+        }
+
+    for candidate in candidates:
+        parent = candidate["parent"]
+        sku = parent["sku"]
+        existing = resolved.get(sku, {})
+        category_url = str(existing.get("category_url") or "").strip()
+        try:
+            fallback_url = make_category_sale_url(category_url)
+        except ValueError:
+            failed_result = candidate.get("failed_result")
+            lookup_result = category_results.get(sku, {})
+            lookup_status = lookup_result.get("category_status", "not_available")
+            lookup_message = lookup_result.get("category_message") or "The parent product category was not available."
+            parent_url = parent_product_url_for_category(existing) or search_url_for_sku(sku)
+            parent_title = str(existing.get("title") or f"Praktis search for {sku}")
+            store_group_link_result(
+                parent,
+                resolved,
+                {
+                    **(failed_result or {}),
+                    "status": "group_category_review",
+                    "source": "group-category-unavailable",
+                    "url": parent_url,
+                    "title": parent_title,
+                    "message": (
+                        f"{candidate['failed_message']} Category fallback could not be created: {lookup_message}"
+                    ),
+                    "group_skus": candidate["skus"],
+                    "group_expected_count": len(candidate["skus"]),
+                    "group_fallback_reason": candidate["failed_status"],
+                    "category_status": lookup_status,
+                },
+            )
+            logger.warning(
+                "Grouped category fallback unavailable: parent=%s failedStatus=%s categoryStatus=%s",
+                sku,
+                candidate["failed_status"],
+                lookup_status,
+            )
+            continue
+
+        category_title = str(existing.get("category_title") or "").strip()
+        failed_result = candidate.get("failed_result") or {}
+        message = (
+            f"{candidate['failed_message']} "
+            "A promotional category link was created from the parent product breadcrumb; review the SKU group manually."
+        )
+        store_group_link_result(
+            parent,
+            resolved,
+            {
+                **failed_result,
+                "status": "group_category_review",
+                "source": "group-category-fallback",
+                "url": fallback_url,
+                "title": f"Praktis promotional category: {category_title or category_url.rstrip('/').rsplit('/', 1)[-1]}",
+                "message": message,
+                "group_skus": candidate["skus"],
+                "group_expected_count": len(candidate["skus"]),
+                "group_fallback_reason": candidate["failed_status"],
+                "category_url": category_url,
+                "category_title": category_title,
+            },
+        )
+        logger.warning(
+            "Using grouped category fallback: parent=%s category=%s reason=%s",
+            sku,
+            fallback_url,
+            candidate["failed_status"],
+        )
+
+
+def parent_product_url_for_category(link: dict) -> str:
+    url = str(link.get("url") or "").strip()
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() not in {"praktis.bg", "www.praktis.bg"}:
+        return ""
+    path = parsed.path.lower().rstrip("/")
+    if not path or any(part in path for part in ("/catalogsearch/", "/customer/", "/checkout/", "/wishlist/")):
+        return ""
+    return url
 
 
 def mark_group_title_missing(parent: dict, resolved: dict[str, dict], message: str) -> None:
@@ -3173,7 +3342,7 @@ def group_website_titles(skus: list[str], resolved: dict[str, dict]) -> list[str
 
 
 def apply_price_check_result(link: dict, result: dict) -> None:
-    for key in ("website_price", "price_status", "price_message"):
+    for key in ("website_price", "price_status", "price_message", "category_url", "category_title"):
         if key in result:
             link[key] = result[key]
 

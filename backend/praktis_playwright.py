@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from html import unescape
+import json
 import logging
 import os
 from pathlib import Path
@@ -18,6 +19,12 @@ from .logging_config import configure_logging
 BASE_URL = "https://praktis.bg"
 SEARCH_URL_TEMPLATE = BASE_URL + "/catalogsearch/result?q={}"
 SKU_RE = re.compile(r"\b\d{5,12}\b")
+EUR_MARKER_RE = re.compile(r"\u20ac|\beur\b|\u0435\u0432\u0440\u043e", re.I)
+BGN_MARKER_RE = re.compile(r"\b(?:bgn|lv)\b|\u043b\u0432\.?", re.I)
+WEB_DECIMAL_PRICE_RE = re.compile(r"(?<![\d.,])(?:0|[1-9][0-9]{0,4})\s*[,.]\s*[0-9]{1,2}(?!\d)")
+WEB_SPLIT_PRICE_RE = re.compile(r"(?<!\d)(?:0|[1-9][0-9]{0,3})\s+[0-9]{2}(?!\d)")
+WEB_INTEGER_PRICE_RE = re.compile(r"(?<!\d)(?:0|[1-9][0-9]{0,4})(?!\d)")
+EUR_TO_BGN_RATE = 1.95583
 DEFAULT_PROFILE_DIR = Path(__file__).resolve().parents[1] / ".praktis-browser-profile"
 CONCURRENCY = max(1, int(os.environ.get("PRAKTIS_CONCURRENCY", "4")))
 SEARCH_TIMEOUT_MS = int(os.environ.get("PRAKTIS_TIMEOUT_MS", "30000"))
@@ -168,6 +175,56 @@ def count_search_results_with_playwright(
     return {result["url"]: result for result in results}
 
 
+def find_product_categories_with_playwright(
+    products: dict[str, str],
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, dict]:
+    configure_logging()
+    requests = [
+        (str(sku).strip(), str(url).strip())
+        for sku, url in products.items()
+        if str(sku).strip() and _is_product_url(str(url).strip())
+    ]
+    if not requests:
+        report_progress(progress_callback, 1, 1, "No product categories to check")
+        return {}
+    logger.info("Starting Praktis product category lookup: products=%s", len(requests))
+
+    if async_playwright is None:
+        logger.error("Playwright is unavailable for Praktis product category lookup")
+        report_progress(progress_callback, len(requests), len(requests), "Category browser unavailable")
+        return {
+            sku: {
+                "sku": sku,
+                "category_status": "playwright_unavailable",
+                "category_message": "Install Playwright to find Praktis product categories.",
+            }
+            for sku, _url in requests
+        }
+
+    try:
+        results = asyncio.run(_run_category_batch(requests, progress_callback))
+    except Exception as exc:
+        message = f"Playwright category lookup failed: {exc}"
+        logger.exception("Praktis product category lookup failed")
+        report_progress(progress_callback, len(requests), len(requests), "Category checks stopped")
+        return {
+            sku: {
+                "sku": sku,
+                "category_status": "error",
+                "category_message": message[:300],
+            }
+            for sku, _url in requests
+        }
+
+    statuses: dict[str, int] = {}
+    for result in results:
+        status = result.get("category_status", "unknown")
+        statuses[status] = statuses.get(status, 0) + 1
+    logger.info("Finished Praktis product category lookup: %s", statuses)
+    return {result["sku"]: result for result in results}
+
+
 async def _run_batch(
     skus: list[str],
     progress_callback: ProgressCallback | None = None,
@@ -223,6 +280,38 @@ async def _run_count_batch(
                     completed,
                     len(tasks),
                     f"Complex link {completed} of {len(tasks)}",
+                )
+            return results
+        finally:
+            await session.close()
+
+
+async def _run_category_batch(
+    requests: list[tuple[str, str]],
+    progress_callback: ProgressCallback | None = None,
+) -> list[dict]:
+    sem = asyncio.Semaphore(CONCURRENCY)
+    Path(PROFILE_DIR).mkdir(parents=True, exist_ok=True)
+
+    async with async_playwright() as p:
+        session = await _launch_browser_context(p)
+        context = session.context
+
+        await _warm_session(context)
+        tasks = [
+            asyncio.create_task(_scrape_product_category(context, sku, url, sem))
+            for sku, url in requests
+        ]
+        try:
+            results: list[dict] = []
+            for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
+                result = await task
+                results.append(result)
+                report_progress(
+                    progress_callback,
+                    completed,
+                    len(tasks),
+                    f"Category {completed} of {len(tasks)}",
                 )
             return results
         finally:
@@ -344,12 +433,15 @@ async def _scrape_one_sku(context, sku: str, sem: asyncio.Semaphore) -> dict:
             current_url = page.url or search_url
             if _is_product_url(current_url) and await _page_has_sku(page, sku):
                 logger.info("Praktis SKU linked directly: sku=%s", sku)
+                category = await _extract_last_product_category(page)
                 return _success_result(
                     sku=sku,
                     url=current_url,
                     title=await _extract_product_title(page),
                     price=await _extract_price_from_page(page),
                     used_search_price=False,
+                    category_url=(category or {}).get("url", ""),
+                    category_title=(category or {}).get("title", ""),
                 )
 
             verified = await _find_verified_product_on_search_page(context, page, sku)
@@ -365,6 +457,8 @@ async def _scrape_one_sku(context, sku: str, sem: asyncio.Semaphore) -> dict:
                     title=verified.get("title", ""),
                     price=verified.get("price"),
                     used_search_price=verified.get("source") == "search_card",
+                    category_url=verified.get("category_url", ""),
+                    category_title=verified.get("category_title", ""),
                 )
 
             body_text = await _safe_inner_text(page, "body")
@@ -454,7 +548,76 @@ async def _count_one_search_url(context, url: str, expected_skus: list[str], sem
             await _safe_close(page)
 
 
-def _success_result(sku: str, url: str, title: str, price: float | None, used_search_price: bool) -> dict:
+async def _scrape_product_category(context, sku: str, url: str, sem: asyncio.Semaphore) -> dict:
+    async with sem:
+        await _polite_delay(GROUP_DELAY_MIN_MS, GROUP_DELAY_MAX_MS)
+        page = await context.new_page()
+        await _prepare_page(page)
+        try:
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=SEARCH_TIMEOUT_MS)
+            status_code = response.status if response else None
+            await _accept_cookies_if_visible(page)
+            await page.wait_for_timeout(PAGE_WAIT_MS)
+            if await _looks_blocked(page, status_code):
+                logger.warning("Praktis category lookup blocked: sku=%s status=%s", sku, status_code)
+                return {
+                    "sku": sku,
+                    "category_status": "blocked",
+                    "category_message": "Praktis/Cloudflare blocked the product category lookup.",
+                }
+            if not await _page_has_sku(page, sku):
+                logger.warning("Praktis category product SKU mismatch: sku=%s url=%s", sku, url)
+                return {
+                    "sku": sku,
+                    "category_status": "sku_mismatch",
+                    "category_message": "The parent product page did not contain the expected SKU.",
+                }
+            category = await _extract_last_product_category(page)
+            if not category:
+                logger.warning("Praktis product category not found: sku=%s url=%s", sku, url)
+                return {
+                    "sku": sku,
+                    "category_status": "not_found",
+                    "category_message": "The parent product breadcrumb category was not found.",
+                }
+            logger.info(
+                "Praktis product category found: sku=%s category=%s",
+                sku,
+                category["url"],
+            )
+            return {
+                "sku": sku,
+                "category_status": "ok",
+                "category_url": category["url"],
+                "category_title": category["title"],
+            }
+        except PlaywrightTimeoutError as exc:
+            logger.warning("Praktis category lookup timed out: sku=%s error=%s", sku, exc)
+            return {
+                "sku": sku,
+                "category_status": "error",
+                "category_message": f"Praktis category lookup timed out: {exc}"[:300],
+            }
+        except Exception as exc:
+            logger.exception("Praktis category lookup error: sku=%s", sku)
+            return {
+                "sku": sku,
+                "category_status": "error",
+                "category_message": f"Praktis category lookup error: {exc!r}"[:300],
+            }
+        finally:
+            await _safe_close(page)
+
+
+def _success_result(
+    sku: str,
+    url: str,
+    title: str,
+    price: float | None,
+    used_search_price: bool,
+    category_url: str = "",
+    category_title: str = "",
+) -> dict:
     safe_url = url if _is_product_url(url) or _is_search_url(url) else SEARCH_URL_TEMPLATE.format(quote(sku))
     result = {
         "sku": sku,
@@ -463,6 +626,9 @@ def _success_result(sku: str, url: str, title: str, price: float | None, used_se
         "url": safe_url,
         "title": title or f"Praktis result for {sku}",
     }
+    if category_url:
+        result["category_url"] = category_url
+        result["category_title"] = category_title
     if price is None:
         result.update(
             {
@@ -647,10 +813,13 @@ async def _load_product_detail(context, url: str, sku: str | None) -> dict | Non
         await product_page.wait_for_timeout(PAGE_WAIT_MS)
         if sku and not await _page_has_sku(product_page, sku):
             return None
+        category = await _extract_last_product_category(product_page)
         return {
             "url": product_page.url or url,
             "title": await _extract_product_title(product_page),
             "price": await _extract_price_from_page(product_page),
+            "category_url": (category or {}).get("url", ""),
+            "category_title": (category or {}).get("title", ""),
         }
     except Exception:
         return None
@@ -874,6 +1043,103 @@ async def _extract_product_title(page) -> str:
     return _title_from_product_url(page.url)
 
 
+async def _extract_last_product_category(page) -> dict | None:
+    selectors = (
+        ".breadcrumbs .items li a[href]",
+        ".breadcrumbs li a[href]",
+        ".breadcrumbs a[href]",
+        "[class*='breadcrumb' i] a[href]",
+        "nav[aria-label*='breadcrumb' i] a[href]",
+    )
+    current_url = str(page.url or "").split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    for selector in selectors:
+        try:
+            links = await page.locator(selector).evaluate_all(
+                "els => els.map(a => ({href: a.href || '', title: (a.innerText || a.textContent || '').trim()}))"
+            )
+        except Exception:
+            links = []
+        categories: list[dict] = []
+        for link in links:
+            url = _abs(str(link.get("href") or ""))
+            if not _is_specific_praktis_category_url(url, current_url):
+                continue
+            categories.append({
+                "url": str(url).split("#", 1)[0].split("?", 1)[0].rstrip("/"),
+                "title": _clean_text(str(link.get("title") or "")),
+            })
+        if categories:
+            return categories[-1]
+    return await _extract_json_ld_product_category(page, current_url)
+
+
+async def _extract_json_ld_product_category(page, current_url: str) -> dict | None:
+    try:
+        scripts = await page.locator("script[type='application/ld+json']").all_text_contents()
+    except Exception:
+        scripts = []
+    for raw in scripts:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        for breadcrumb in _find_json_ld_breadcrumbs(payload):
+            categories: list[dict] = []
+            items = breadcrumb.get("itemListElement") or []
+            if not isinstance(items, list):
+                continue
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                item = entry.get("item")
+                if isinstance(item, dict):
+                    url = item.get("@id") or item.get("url")
+                    title = item.get("name") or entry.get("name")
+                else:
+                    url = item or entry.get("@id") or entry.get("url")
+                    title = entry.get("name")
+                absolute_url = _abs(str(url or ""))
+                if not _is_specific_praktis_category_url(absolute_url, current_url):
+                    continue
+                categories.append(
+                    {
+                        "url": str(absolute_url).split("#", 1)[0].split("?", 1)[0].rstrip("/"),
+                        "title": _clean_text(str(title or "")),
+                    }
+                )
+            if categories:
+                return categories[-1]
+    return None
+
+
+def _find_json_ld_breadcrumbs(value) -> list[dict]:
+    if isinstance(value, list):
+        found: list[dict] = []
+        for item in value:
+            found.extend(_find_json_ld_breadcrumbs(item))
+        return found
+    if not isinstance(value, dict):
+        return []
+    found = [value] if value.get("@type") == "BreadcrumbList" else []
+    for key in ("@graph", "mainEntity", "subjectOf"):
+        if key in value:
+            found.extend(_find_json_ld_breadcrumbs(value[key]))
+    return found
+
+
+def _is_specific_praktis_category_url(url: str | None, current_url: str = "") -> bool:
+    if not url:
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() not in {"praktis.bg", "www.praktis.bg"}:
+        return False
+    normalized = str(url).split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if normalized == current_url or not parsed.path.strip("/"):
+        return False
+    low_path = parsed.path.lower()
+    return not any(part in low_path for part in ("/catalogsearch/", "/customer/", "/checkout/", "/wishlist/"))
+
+
 def _clean_product_title(value: str) -> str:
     title = _clean_text(value)
     title = re.sub(r"\s+\|\s+.*$", "", title).strip()
@@ -1057,7 +1323,15 @@ def extract_euro_price_from_text(text: str) -> float | None:
     if not cleaned:
         return None
 
-    for match in re.finditer(r"\u20ac|eur|\u0435\u0432\u0440\u043e", cleaned, re.I):
+    euro_markers = list(EUR_MARKER_RE.finditer(cleaned))
+    bgn_markers = list(BGN_MARKER_RE.finditer(cleaned))
+    if euro_markers and bgn_markers:
+        validated = extract_validated_euro_bgn_price(cleaned, euro_markers, bgn_markers)
+        if validated is not None:
+            return validated
+        return None
+
+    for match in euro_markers:
         before = cleaned[max(0, match.start() - 90) : match.start()]
         price = extract_last_price_like_token(before)
         if price is not None:
@@ -1081,6 +1355,106 @@ def extract_euro_price_from_text(text: str) -> float | None:
     return None
 
 
+def extract_validated_euro_bgn_price(
+    text: str,
+    euro_markers: list[re.Match] | None = None,
+    bgn_markers: list[re.Match] | None = None,
+) -> float | None:
+    cleaned = _clean_text(text)
+    euro_markers = euro_markers if euro_markers is not None else list(EUR_MARKER_RE.finditer(cleaned))
+    bgn_markers = bgn_markers if bgn_markers is not None else list(BGN_MARKER_RE.finditer(cleaned))
+    if not euro_markers or not bgn_markers:
+        return None
+
+    tokens = _website_price_tokens(cleaned)
+    euro_candidates = list(tokens)
+    for match in re.finditer(
+        r"(?<!\d)(0|[1-9][0-9]{0,3})\s*(?:\u20ac|eur|\u0435\u0432\u0440\u043e)\s*([0-9]{2})(?!\d)",
+        cleaned,
+        re.I,
+    ):
+        euro_candidates.append(
+            (round(float(match.group(1)) + int(match.group(2)) / 100, 2), match.start(), match.end())
+        )
+
+    matches: list[tuple[float, float]] = []
+    for euro_marker in euro_markers:
+        nearby_euros = _nearby_price_candidates(euro_candidates, euro_marker, max_distance=110)
+        for bgn_marker in bgn_markers:
+            if abs(bgn_marker.start() - euro_marker.start()) > 240:
+                continue
+            nearby_bgn = _nearby_price_candidates(tokens, bgn_marker, max_distance=110)
+            for euro_value, euro_start, euro_end, euro_distance, euro_side_penalty in nearby_euros:
+                for bgn_value, bgn_start, bgn_end, bgn_distance, bgn_side_penalty in nearby_bgn:
+                    if (euro_start, euro_end) == (bgn_start, bgn_end) or euro_value <= 0:
+                        continue
+                    expected_bgn = round(euro_value * EUR_TO_BGN_RATE, 2)
+                    conversion_error = abs(bgn_value - expected_bgn)
+                    if conversion_error > 0.06:
+                        continue
+                    score = (
+                        conversion_error * 100
+                        + euro_distance * 0.03
+                        + bgn_distance * 0.03
+                        + euro_side_penalty
+                        + bgn_side_penalty
+                    )
+                    matches.append((score, euro_value))
+
+    if not matches:
+        return None
+    return min(matches, key=lambda candidate: candidate[0])[1]
+
+
+def _website_price_tokens(text: str) -> list[tuple[float, int, int]]:
+    tokens: list[tuple[float, int, int]] = []
+    occupied: list[tuple[int, int]] = []
+    for pattern in (WEB_DECIMAL_PRICE_RE, WEB_SPLIT_PRICE_RE, WEB_INTEGER_PRICE_RE):
+        for match in pattern.finditer(text):
+            if any(match.start() < end and match.end() > start for start, end in occupied):
+                continue
+            value = _website_price_token_value(match.group(0))
+            if value is None:
+                continue
+            tokens.append((value, match.start(), match.end()))
+            occupied.append((match.start(), match.end()))
+    return tokens
+
+
+def _website_price_token_value(value: str) -> float | None:
+    compact = value.strip()
+    decimal = re.fullmatch(r"(0|[1-9][0-9]{0,4})\s*[,.]\s*([0-9]{1,2})", compact)
+    if decimal:
+        return round(float(f"{decimal.group(1)}.{decimal.group(2).ljust(2, '0')}"), 2)
+    split = re.fullmatch(r"(0|[1-9][0-9]{0,3})\s+([0-9]{2})", compact)
+    if split:
+        return round(float(split.group(1)) + int(split.group(2)) / 100, 2)
+    if re.fullmatch(r"0|[1-9][0-9]{0,4}", compact):
+        return round(float(compact), 2)
+    return None
+
+
+def _nearby_price_candidates(
+    candidates: list[tuple[float, int, int]],
+    marker: re.Match,
+    max_distance: int,
+) -> list[tuple[float, int, int, int, int]]:
+    nearby: list[tuple[float, int, int, int, int]] = []
+    for value, start, end in candidates:
+        if end <= marker.start():
+            distance = marker.start() - end
+            side_penalty = 0
+        elif start >= marker.end():
+            distance = start - marker.end()
+            side_penalty = 4
+        else:
+            distance = 0
+            side_penalty = 2
+        if distance <= max_distance:
+            nearby.append((value, start, end, distance, side_penalty))
+    return nearby
+
+
 def extract_price_like_token(text: str) -> float | None:
     block = _clean_text(text)
     decimal = re.search(r"\b(0|[1-9][0-9]{0,4})\s*[,.]\s*([0-9]{1,2})\b", block)
@@ -1090,10 +1464,6 @@ def extract_price_like_token(text: str) -> float | None:
     split = re.search(r"\b(0|[1-9][0-9]{0,3})\s+([0-9]{2})\b", block)
     if split:
         return round(float(split.group(1)) + int(split.group(2)) / 100, 2)
-
-    compact = re.search(r"\b([1-9][0-9]{2,5})\b", block)
-    if compact:
-        return round(int(compact.group(1)) / 100, 2)
 
     integer = re.search(r"\b([1-9][0-9]{0,4})\b", block)
     if integer:
@@ -1110,9 +1480,6 @@ def extract_last_price_like_token(text: str) -> float | None:
 
     for match in re.finditer(r"\b(0|[1-9][0-9]{0,3})\s+([0-9]{2})\b", block):
         matches.append((match.end(), match.start(), 3, round(float(match.group(1)) + int(match.group(2)) / 100, 2)))
-
-    for match in re.finditer(r"\b([1-9][0-9]{3,5})\b", block):
-        matches.append((match.end(), match.start(), 2, round(int(match.group(1)) / 100, 2)))
 
     for match in re.finditer(r"\b([1-9][0-9]{0,4})\b", block):
         matches.append((match.end(), match.start(), 1, round(float(match.group(1)), 2)))

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Praktis Brochure Linker">
+  <rect width="64" height="64" rx="12" fill="#18232b"/>
+  <path d="M14 8h24l12 12v36H14z" fill="#fff"/>
+  <path d="M38 8v12h12z" fill="#d8e1e7"/>
+  <path d="M22 25h20M22 31h12" fill="none" stroke="#b7c2ca" stroke-width="3" stroke-linecap="round"/>
+  <g transform="translate(10 23) scale(1.85)" fill="none" stroke="#ef8b18" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+  </g>
+</svg>

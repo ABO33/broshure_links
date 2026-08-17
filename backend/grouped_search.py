@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, urlunparse
 
 
 PRAKTIS_SEARCH_URL = "https://praktis.bg/catalogsearch/result"
@@ -112,6 +112,7 @@ COMMON_QUERY_STOP_WORDS = {
     "result",
     "product",
     "sku",
+    "ширина",
 }
 
 NUMBER_RE = re.compile(r"^[\u00f8\u0444]?\d+(?:[.,]\d+)?(?:[x\u0445/]\d+(?:[.,]\d+)?)*$")
@@ -132,6 +133,15 @@ def make_group_search_url_from_titles(titles: list[str]) -> tuple[str, str]:
     return f"{PRAKTIS_SEARCH_URL}?{urlencode(params)}", query
 
 
+def make_category_sale_url(category_url: str) -> str:
+    parsed = urlparse(str(category_url or "").strip())
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() not in {"praktis.bg", "www.praktis.bg"}:
+        raise ValueError("The grouped category fallback requires a Praktis category URL.")
+    if not parsed.path.strip("/") or parsed.path.rstrip("/") == "/catalogsearch/result":
+        raise ValueError("The grouped category fallback requires a specific Praktis category.")
+    return urlunparse(("https", "praktis.bg", parsed.path.rstrip("/"), "", urlencode({"onSale": 3}), ""))
+
+
 def common_ordered_words(titles: list[str]) -> str:
     token_lists = [tokenize_title(title) for title in titles if clean_title(title)]
     token_lists = remove_variant_tokens(token_lists)
@@ -144,22 +154,21 @@ def common_ordered_words(titles: list[str]) -> str:
 
 
 def common_meaningful_words(token_lists: list[list[str]]) -> str:
-    normalized_sets = [{normalize_token(token) for token in tokens if normalize_token(token)} for tokens in token_lists]
+    normalized_sets = [{comparison_key(token) for token in tokens if comparison_key(token)} for tokens in token_lists]
     common_tokens = set.intersection(*normalized_sets) if normalized_sets else set()
     result: list[str] = []
     for token in token_lists[0]:
         norm = normalize_token(token)
-        if not norm or norm not in common_tokens:
+        if not norm or comparison_key(token) not in common_tokens:
             continue
-        if not is_meaningful_query_token(norm):
+        if not is_meaningful_query_token(norm, allow_numeric=True, allow_color=True, allow_shared_spec=True):
             continue
         result.append(token)
     return cleanup_query(" ".join(result[:8]))
 
 
 def frequent_meaningful_words(token_lists: list[list[str]]) -> str:
-    normalized_lists = [[normalize_token(token) for token in tokens if normalize_token(token)] for tokens in token_lists]
-    if not normalized_lists:
+    if not token_lists:
         return ""
     counts: dict[str, int] = {}
     first_seen: dict[str, str] = {}
@@ -169,36 +178,47 @@ def frequent_meaningful_words(token_lists: list[list[str]]) -> str:
             norm = normalize_token(token)
             if not norm or not is_meaningful_query_token(norm):
                 continue
-            first_seen.setdefault(norm, token)
-            seen_in_title.add(norm)
-        for norm in seen_in_title:
-            counts[norm] = counts.get(norm, 0) + 1
+            key = comparison_key(token)
+            first_seen.setdefault(key, token)
+            seen_in_title.add(key)
+        for key in seen_in_title:
+            counts[key] = counts.get(key, 0) + 1
 
     minimum = max(2, math_ceil(len(token_lists) * 0.6))
     first_title = token_lists[0]
     result: list[str] = []
     used: set[str] = set()
     for token in first_title:
-        norm = normalize_token(token)
-        if norm in used or counts.get(norm, 0) < minimum:
+        key = comparison_key(token)
+        if key in used or counts.get(key, 0) < minimum:
             continue
         result.append(token)
-        used.add(norm)
+        used.add(key)
 
     if not result:
-        ranked = sorted(counts, key=lambda norm: (-counts[norm], list(first_seen).index(norm)))
-        result = [first_seen[norm] for norm in ranked[:4] if counts[norm] >= 2]
+        ranked = sorted(counts, key=lambda key: (-counts[key], list(first_seen).index(key)))
+        result = [first_seen[key] for key in ranked[:4] if counts[key] >= 2]
 
     return cleanup_query(" ".join(result[:8]))
 
 
-def is_meaningful_query_token(norm: str) -> bool:
-    return (
+def is_meaningful_query_token(
+    norm: str,
+    allow_numeric: bool = False,
+    allow_color: bool = False,
+    allow_shared_spec: bool = False,
+) -> bool:
+    meaningful_word = (
         bool(norm)
         and bool(LETTER_RE.search(norm))
         and norm not in COMMON_QUERY_STOP_WORDS
-        and norm not in COLOR_WORDS
+        and (allow_color or norm not in COLOR_WORDS)
         and not is_dimension_token(norm)
+    )
+    return (
+        meaningful_word
+        or (allow_numeric and bool(re.fullmatch(r"\d{1,6}", norm)))
+        or (allow_shared_spec and is_shared_search_spec(norm))
     )
 
 
@@ -207,7 +227,7 @@ def math_ceil(value: float) -> int:
 
 
 def remove_variant_tokens(token_lists: list[list[str]]) -> list[list[str]]:
-    normalized_sets = [{normalize_token(token) for token in tokens} for tokens in token_lists]
+    normalized_sets = [{comparison_key(token) for token in tokens} for tokens in token_lists]
     common_tokens = set.intersection(*normalized_sets) if normalized_sets else set()
     cleaned_lists: list[list[str]] = []
 
@@ -218,17 +238,25 @@ def remove_variant_tokens(token_lists: list[list[str]]) -> list[list[str]]:
             norm = normalize_token(token)
             if not norm:
                 continue
+            key = comparison_key(token)
             if skip_next_unit and is_unit_only(norm):
                 skip_next_unit = False
                 continue
             skip_next_unit = False
-            if norm in COLOR_WORDS:
+            model_base = variant_model_base(token)
+            if model_base:
+                cleaned.append(model_base)
+                continue
+            if norm in COLOR_WORDS and key not in common_tokens:
                 continue
             if is_always_variant_dimension(norm):
+                if key in common_tokens and is_shared_search_spec(norm):
+                    cleaned.append(token)
+                    continue
                 if NUMBER_RE.fullmatch(norm):
                     skip_next_unit = True
                 continue
-            if is_dimension_token(norm) and norm not in common_tokens:
+            if is_dimension_token(norm) and key not in common_tokens:
                 if NUMBER_RE.fullmatch(norm):
                     skip_next_unit = True
                 continue
@@ -258,6 +286,30 @@ def cleanup_query(query: str) -> str:
 
 def normalize_token(token: str) -> str:
     return str(token or "").strip(" ,.;:()[]{}").lower()
+
+
+def comparison_key(token: str) -> str:
+    return transliterate_cyrillic(normalize_token(token))
+
+
+def transliterate_cyrillic(value: str) -> str:
+    replacements = {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ж": "zh",
+        "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
+        "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f",
+        "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sht", "ъ": "a", "ь": "y",
+        "ю": "yu", "я": "ya",
+    }
+    return "".join(replacements.get(char, char) for char in value)
+
+
+def variant_model_base(token: str) -> str:
+    match = re.fullmatch(r"(\d{3,6})/(\d{1,2})", normalize_token(token))
+    return match.group(1) if match else ""
+
+
+def is_shared_search_spec(norm: str) -> bool:
+    return bool(re.fullmatch(r"\d+(?:[.,]\d+)?(?:w|kw|квт|v|hz|хц)", norm, re.I))
 
 
 def is_dimension_token(norm: str) -> bool:
