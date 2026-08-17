@@ -7,9 +7,17 @@ if (Test-Path ".git") {
   git pull --ff-only
 }
 
-$chromeArgs = @("-Restart")
+$chromeProfile = $env:PRAKTIS_SERVICE_CHROME_PROFILE
+if ([string]::IsNullOrWhiteSpace($chromeProfile)) {
+  $chromeProfile = Join-Path $env:USERPROFILE "PraktisServiceChrome"
+}
+
+$chromeArgs = @{
+  ProfileDir = $chromeProfile
+  Restart = $true
+}
 if ($env:PRAKTIS_SERVICE_CHROME_VISIBLE -match "^(1|true|yes)$") {
-  $chromeArgs += "-Visible"
+  $chromeArgs.Visible = $true
 }
 
 & (Join-Path $scriptDir "launch-service-chrome.ps1") @chromeArgs

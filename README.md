@@ -71,6 +71,9 @@ The dedicated Chrome profile is stored at:
 %USERPROFILE%\PraktisServiceChrome
 ```
 
+Set `PRAKTIS_SERVICE_CHROME_PROFILE` before running `docker-start.cmd` only if
+the dedicated profile must be stored in a different directory.
+
 The first time you run Docker mode, sign in and pass any Praktis/Cloudflare
 challenge in the Chrome window that opens. After that, Docker connects to this
 same Windows Chrome profile through `http://host.docker.internal:9222`, so it can

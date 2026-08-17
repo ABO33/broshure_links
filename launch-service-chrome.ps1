@@ -6,6 +6,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProfileDir = [System.IO.Path]::GetFullPath($ProfileDir)
 
 function Get-ServiceChromeProcesses {
   param([string]$ProfileDir)
@@ -117,11 +118,18 @@ if ($Visible) {
 }
 else {
   $logFile = Join-Path $ProfileDir "chrome-headless.log"
+  $previousLogFile = Join-Path $ProfileDir "chrome-headless.previous.log"
+  if (Test-Path -LiteralPath $logFile) {
+    if (Test-Path -LiteralPath $previousLogFile) {
+      Remove-Item -LiteralPath $previousLogFile -Force
+    }
+    Move-Item -LiteralPath $logFile -Destination $previousLogFile
+  }
   $arguments += @(
-    "--headless",
+    "--headless=new",
     "--disable-gpu",
     "--enable-logging",
-    "--v=1",
+    "--v=0",
     "--log-file=$logFile",
     "https://praktis.bg"
   )
@@ -130,11 +138,18 @@ else {
 }
 
 $argumentLine = Join-ProcessArguments -Arguments $arguments
-Start-Process -FilePath $chrome -ArgumentList $argumentLine -WindowStyle $windowStyle
+$chromeProcess = Start-Process -FilePath $chrome -ArgumentList $argumentLine -WindowStyle $windowStyle -PassThru
 for ($attempt = 1; $attempt -le 30; $attempt++) {
   if (Test-DevToolsEndpoint -Port $Port) {
     Write-Host "Started $mode service Chrome profile at $ProfileDir on port $Port."
     return
+  }
+  if ($chromeProcess.HasExited) {
+    $logHint = ""
+    if ($logFile -and (Test-Path -LiteralPath $logFile)) {
+      $logHint = "`nLast Chrome log lines:`n" + ((Get-Content -LiteralPath $logFile -Tail 20) -join "`n")
+    }
+    throw "Chrome exited with code $($chromeProcess.ExitCode) before DevTools became ready. Profile: $ProfileDir.$logHint"
   }
   Start-Sleep -Seconds 1
 }
