@@ -29,9 +29,9 @@ class PraktisWebsitePriceExtractionTests(unittest.TestCase):
         text = "Долен шкаф 79.00 154 € 154.51 лв"
         self.assertEqual(extract_euro_price_from_text(text), 79.00)
 
-    def test_invalid_euro_bgn_pair_returns_no_price(self):
-        self.assertIsNone(extract_euro_price_from_text("Артикул 60 € 42.25 лв"))
-        self.assertIsNone(extract_euro_price_from_text("Артикул 154 € 154.51 лв"))
+    def test_euro_price_does_not_require_a_lev_conversion_pair(self):
+        self.assertEqual(extract_euro_price_from_text("Артикул 60 € 42.25 лв"), 60.0)
+        self.assertEqual(extract_euro_price_from_text("Артикул 154 € 154.51 лв"), 154.0)
 
     def test_whole_website_amount_is_not_divided_into_cents(self):
         self.assertEqual(extract_price_like_token("154"), 154.00)

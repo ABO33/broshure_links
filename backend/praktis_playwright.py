@@ -20,11 +20,6 @@ BASE_URL = "https://praktis.bg"
 SEARCH_URL_TEMPLATE = BASE_URL + "/catalogsearch/result?q={}"
 SKU_RE = re.compile(r"\b\d{5,12}\b")
 EUR_MARKER_RE = re.compile(r"\u20ac|\beur\b|\u0435\u0432\u0440\u043e", re.I)
-BGN_MARKER_RE = re.compile(r"\b(?:bgn|lv)\b|\u043b\u0432\.?", re.I)
-WEB_DECIMAL_PRICE_RE = re.compile(r"(?<![\d.,])(?:0|[1-9][0-9]{0,4})\s*[,.]\s*[0-9]{1,2}(?!\d)")
-WEB_SPLIT_PRICE_RE = re.compile(r"(?<!\d)(?:0|[1-9][0-9]{0,3})\s+[0-9]{2}(?!\d)")
-WEB_INTEGER_PRICE_RE = re.compile(r"(?<!\d)(?:0|[1-9][0-9]{0,4})(?!\d)")
-EUR_TO_BGN_RATE = 1.95583
 DEFAULT_PROFILE_DIR = Path(__file__).resolve().parents[1] / ".praktis-browser-profile"
 CONCURRENCY = max(1, int(os.environ.get("PRAKTIS_CONCURRENCY", "4")))
 SEARCH_TIMEOUT_MS = int(os.environ.get("PRAKTIS_TIMEOUT_MS", "30000"))
@@ -1324,14 +1319,12 @@ def extract_euro_price_from_text(text: str) -> float | None:
         return None
 
     euro_markers = list(EUR_MARKER_RE.finditer(cleaned))
-    bgn_markers = list(BGN_MARKER_RE.finditer(cleaned))
-    if euro_markers and bgn_markers:
-        validated = extract_validated_euro_bgn_price(cleaned, euro_markers, bgn_markers)
-        if validated is not None:
-            return validated
-        return None
 
     for match in euro_markers:
+        price = extract_euro_price_around_marker(cleaned, match)
+        if price is not None:
+            return price
+
         before = cleaned[max(0, match.start() - 90) : match.start()]
         price = extract_last_price_like_token(before)
         if price is not None:
@@ -1355,104 +1348,25 @@ def extract_euro_price_from_text(text: str) -> float | None:
     return None
 
 
-def extract_validated_euro_bgn_price(
-    text: str,
-    euro_markers: list[re.Match] | None = None,
-    bgn_markers: list[re.Match] | None = None,
-) -> float | None:
-    cleaned = _clean_text(text)
-    euro_markers = euro_markers if euro_markers is not None else list(EUR_MARKER_RE.finditer(cleaned))
-    bgn_markers = bgn_markers if bgn_markers is not None else list(BGN_MARKER_RE.finditer(cleaned))
-    if not euro_markers or not bgn_markers:
+def extract_euro_price_around_marker(text: str, marker: re.Match) -> float | None:
+    before = text[max(0, marker.start() - 90) : marker.start()]
+    after = text[marker.end() : marker.end() + 90]
+    major = extract_last_price_like_token(before)
+    if major is None:
         return None
 
-    tokens = _website_price_tokens(cleaned)
-    euro_candidates = list(tokens)
-    for match in re.finditer(
-        r"(?<!\d)(0|[1-9][0-9]{0,3})\s*(?:\u20ac|eur|\u0435\u0432\u0440\u043e)\s*([0-9]{2})(?!\d)",
-        cleaned,
-        re.I,
-    ):
-        euro_candidates.append(
-            (round(float(match.group(1)) + int(match.group(2)) / 100, 2), match.start(), match.end())
-        )
+    split_cents = re.match(r"\s*([0-9]{2})(?![\d.,])", after)
+    if split_cents and float(major).is_integer() and major <= 9999:
+        return round(major + int(split_cents.group(1)) / 100, 2)
 
-    matches: list[tuple[float, float]] = []
-    for euro_marker in euro_markers:
-        nearby_euros = _nearby_price_candidates(euro_candidates, euro_marker, max_distance=110)
-        for bgn_marker in bgn_markers:
-            if abs(bgn_marker.start() - euro_marker.start()) > 240:
-                continue
-            nearby_bgn = _nearby_price_candidates(tokens, bgn_marker, max_distance=110)
-            for euro_value, euro_start, euro_end, euro_distance, euro_side_penalty in nearby_euros:
-                for bgn_value, bgn_start, bgn_end, bgn_distance, bgn_side_penalty in nearby_bgn:
-                    if (euro_start, euro_end) == (bgn_start, bgn_end) or euro_value <= 0:
-                        continue
-                    expected_bgn = round(euro_value * EUR_TO_BGN_RATE, 2)
-                    conversion_error = abs(bgn_value - expected_bgn)
-                    if conversion_error > 0.06:
-                        continue
-                    score = (
-                        conversion_error * 100
-                        + euro_distance * 0.03
-                        + bgn_distance * 0.03
-                        + euro_side_penalty
-                        + bgn_side_penalty
-                    )
-                    matches.append((score, euro_value))
+    following_decimal = re.match(r"\s*([0-9]{1,5})[,.][0-9]{1,2}", after)
+    if following_decimal and float(major).is_integer() and int(major) == int(following_decimal.group(1)):
+        prior = re.sub(r"(?:^|\s)[0-9]{1,5}\s*$", "", before)
+        prior_price = extract_last_price_like_token(prior)
+        if prior_price is not None:
+            return prior_price
 
-    if not matches:
-        return None
-    return min(matches, key=lambda candidate: candidate[0])[1]
-
-
-def _website_price_tokens(text: str) -> list[tuple[float, int, int]]:
-    tokens: list[tuple[float, int, int]] = []
-    occupied: list[tuple[int, int]] = []
-    for pattern in (WEB_DECIMAL_PRICE_RE, WEB_SPLIT_PRICE_RE, WEB_INTEGER_PRICE_RE):
-        for match in pattern.finditer(text):
-            if any(match.start() < end and match.end() > start for start, end in occupied):
-                continue
-            value = _website_price_token_value(match.group(0))
-            if value is None:
-                continue
-            tokens.append((value, match.start(), match.end()))
-            occupied.append((match.start(), match.end()))
-    return tokens
-
-
-def _website_price_token_value(value: str) -> float | None:
-    compact = value.strip()
-    decimal = re.fullmatch(r"(0|[1-9][0-9]{0,4})\s*[,.]\s*([0-9]{1,2})", compact)
-    if decimal:
-        return round(float(f"{decimal.group(1)}.{decimal.group(2).ljust(2, '0')}"), 2)
-    split = re.fullmatch(r"(0|[1-9][0-9]{0,3})\s+([0-9]{2})", compact)
-    if split:
-        return round(float(split.group(1)) + int(split.group(2)) / 100, 2)
-    if re.fullmatch(r"0|[1-9][0-9]{0,4}", compact):
-        return round(float(compact), 2)
-    return None
-
-
-def _nearby_price_candidates(
-    candidates: list[tuple[float, int, int]],
-    marker: re.Match,
-    max_distance: int,
-) -> list[tuple[float, int, int, int, int]]:
-    nearby: list[tuple[float, int, int, int, int]] = []
-    for value, start, end in candidates:
-        if end <= marker.start():
-            distance = marker.start() - end
-            side_penalty = 0
-        elif start >= marker.end():
-            distance = start - marker.end()
-            side_penalty = 4
-        else:
-            distance = 0
-            side_penalty = 2
-        if distance <= max_distance:
-            nearby.append((value, start, end, distance, side_penalty))
-    return nearby
+    return major
 
 
 def extract_price_like_token(text: str) -> float | None:

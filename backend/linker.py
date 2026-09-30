@@ -58,6 +58,7 @@ class PageText:
     words: list[Word]
     footer_top: float | None = None
     image_blocks: list[dict] | None = None
+    header_blocks: list[dict] | None = None
 
 
 @dataclass
@@ -73,9 +74,7 @@ HEADER_SKU_TEXT_INSET = 4.0
 HEADER_PRICE_BOX_PADDING = 6.5
 HEADER_PAGE_EDGE_TOLERANCE = 18.0
 HEADER_EDGE_TOUCH_TOLERANCE = 6.0
-HEADER_PRICE_GROUP_GAP = 68.0
 HEADER_CENTS_MAX_GAP = 18.0
-BGN_PER_EUR = 1.95583
 MAX_SHORTHAND_RANGE_ITEMS = 60
 UNDEFINED_BROCHURE_PRICE_TEXT = "Not defined"
 MISSING_BROCHURE_PRICE_TEXT = "?"
@@ -367,6 +366,7 @@ def extract_text_pages(
                     words,
                     footer_top,
                     find_large_image_blocks(page),
+                    find_visual_price_header_blocks(page),
                 )
             )
             report_progress(progress_callback, "extract_pdf", index, total_pages, f"Page {index} of {total_pages}")
@@ -1417,14 +1417,12 @@ def detect_variant_table_rows(
             for candidate in table_price_candidates(line, word.x1 + 8, right_limit)
             if euro_window[0] <= candidate[0] and candidate[1] <= euro_window[1]
         ]
-        all_price_candidates = table_price_candidates(line, word.x1 + 8, right_limit)
-
         if not price_candidates:
             continue
 
         price_candidates.sort(key=lambda item: item[0])
         chosen = price_candidates[0]
-        table_issue = table_price_issue(price_window, chosen, all_price_candidates)
+        table_issue = table_price_issue(price_window)
         price_group_right = chosen[1]
         line_right = max(chosen[1], price_group_right)
         line_top = min(other.top for other in line)
@@ -1616,49 +1614,15 @@ def find_table_price_window(page: PageText, sku_word: Word, right_limit: float) 
     return None
 
 
-def table_price_issue(
-    price_window: dict,
-    euro_candidate: tuple[float, float, float, str],
-    all_price_candidates: list[tuple[float, float, float, str]],
-) -> str:
+def table_price_issue(price_window: dict) -> str:
     issues: list[str] = []
     first_header = price_window.get("first_header", "")
     second_header = price_window.get("second_header", "")
-    second_window = price_window.get("second_window")
 
     if is_leva_header(first_header) or (second_header and not is_leva_header(second_header)):
         issues.append("Table price headers are inconsistent; euro column should be first.")
 
-    leva_candidate = None
-    if second_window:
-        second_left, second_right = second_window
-        second_left_tolerance = 6.0
-        second_candidates = [
-            candidate
-            for candidate in all_price_candidates
-            if second_left - second_left_tolerance <= candidate[0]
-            and candidate[1] <= second_right
-            and candidate[0] > euro_candidate[1] + 0.5
-        ]
-        if second_candidates:
-            leva_candidate = sorted(second_candidates, key=lambda item: item[0])[0]
-
-    if (
-        leva_candidate
-        and euro_candidate[2] is not None
-        and leva_candidate[2] is not None
-        and not bgn_matches_euro(euro_candidate[2], leva_candidate[2])
-    ):
-        issues.append(
-            f"Table leva/euro conversion mismatch: {leva_candidate[2]:.2f} / {euro_candidate[2]:.2f} is not {BGN_PER_EUR:.5f}."
-        )
-
     return " ".join(issues)
-
-
-def bgn_matches_euro(euro_price: float, leva_price: float) -> bool:
-    expected = round(float(euro_price) * BGN_PER_EUR, 2)
-    return abs(expected - float(leva_price)) <= 0.02
 
 
 def item_price_box_status(page: PageText, box: dict, sku_word: Word, price_word: Word) -> tuple[str, str]:
@@ -1667,13 +1631,6 @@ def item_price_box_status(page: PageText, box: dict, sku_word: Word, price_word:
         return "", ""
 
     candidates = header_price_candidates_for_box(page, box, sku_word, price_word)
-
-    leva_candidate = find_parent_leva_candidate(candidates, price_word)
-    if leva_candidate and leva_candidate[2] is not None and not bgn_matches_euro(euro_price, leva_candidate[2]):
-        return (
-            "price_box_error",
-            f"Parent leva/euro conversion mismatch: {leva_candidate[2]:.2f} / {euro_price:.2f} is not {BGN_PER_EUR:.5f}.",
-        )
 
     discount_issue = parent_discount_issue(page, box, price_word, euro_price, candidates)
     if discount_issue:
@@ -1726,21 +1683,6 @@ def header_price_candidates_for_box(
         seen.add(key)
         candidates.append((word.x0, word.x1, price, word.text, word))
     return sorted(candidates, key=lambda item: (item[0], item[1], -len(item[3])))
-
-
-def find_parent_leva_candidate(
-    candidates: list[tuple[float, float, float | None, str, Word]],
-    euro_word: Word,
-) -> tuple[float, float, float | None, str, Word] | None:
-    right_side = [
-        candidate
-        for candidate in candidates
-        if candidate[0] > euro_word.x1 + 0.5
-        and abs(candidate[4].mid_y - euro_word.mid_y) <= 11
-    ]
-    if not right_side:
-        return None
-    return sorted(right_side, key=lambda item: (item[0], -len(item[3])))[0]
 
 
 def parent_discount_issue(
@@ -1891,6 +1833,7 @@ def detect_header_driven_boxes(
         tolerance=8,
     )
     headers: list[dict] = []
+    claimed_visual_headers: set[tuple[int, int, int]] = set()
 
     for row in candidate_rows:
         row_words = [
@@ -1906,7 +1849,20 @@ def detect_header_driven_boxes(
                 if index + 1 < len(row_words)
                 else page.width
             )
-            if is_variant_table_sku_word(page, word, min_digits, max_digits):
+            visual_header = find_visual_price_header_block(page, word, page.width)
+            if visual_header:
+                visual_key = (
+                    round(float(visual_header["x0"])),
+                    round(float(visual_header["x1"])),
+                    round(float(visual_header["top"])),
+                )
+                if visual_key in claimed_visual_headers:
+                    continue
+                claimed_visual_headers.add(visual_key)
+                right_edge = float(visual_header["x1"])
+            if page.header_blocks and visual_header is None:
+                continue
+            if visual_header is None and is_variant_table_sku_word(page, word, min_digits, max_digits):
                 if has_variant_table_price_on_row(page, word, min_digits, max_digits):
                     continue
                 direct_price_word = find_direct_header_price_word(page, word, right_edge)
@@ -1918,9 +1874,7 @@ def detect_header_driven_boxes(
                     continue
                 if direct_price_word:
                     price_word = direct_price_word
-                    left_edge = clamp(word.x0 - HEADER_SKU_TEXT_INSET, 0, page.width)
-                    right_edge = find_header_price_box_right(page, word, price_word, right_edge)
-                    top = clamp(min(word.top - 3, price_word.top - 13), 0, page.height)
+                    left_edge, right_edge, top = item_header_geometry(page, word, price_word, right_edge)
                     row_headers.append(
                         {
                             "word": word,
@@ -1928,6 +1882,7 @@ def detect_header_driven_boxes(
                             "left": left_edge,
                             "right": clamp(right_edge, left_edge + 8, page.width),
                             "top": top,
+                            "visual_header": visual_header is not None,
                         }
                     )
                     continue
@@ -1939,9 +1894,7 @@ def detect_header_driven_boxes(
                 price_word = find_header_price_word(page, word, right_edge)
             if not price_word:
                 continue
-            left_edge = clamp(word.x0 - HEADER_SKU_TEXT_INSET, 0, page.width)
-            right_edge = find_header_price_box_right(page, word, price_word, right_edge)
-            top = clamp(min(word.top - 3, price_word.top - 13), 0, page.height)
+            left_edge, right_edge, top = item_header_geometry(page, word, price_word, right_edge)
             row_headers.append(
                 {
                     "word": word,
@@ -1949,13 +1902,20 @@ def detect_header_driven_boxes(
                     "left": left_edge,
                     "right": clamp(right_edge, left_edge + 8, page.width),
                     "top": top,
+                    "visual_header": visual_header is not None,
                 }
             )
         headers.extend(row_headers)
 
     primary_candidates = [word for word in candidates if not word.fragment]
     has_top_page_headers = 1 <= len(headers) <= 2 and all(header["top"] <= 24 for header in headers)
-    if len(headers) < 3 and not (len(headers) == 1 and len(primary_candidates) == 1) and not has_top_page_headers:
+    has_visual_headers = bool(headers) and all(header.get("visual_header") for header in headers)
+    if (
+        len(headers) < 3
+        and not (len(headers) == 1 and len(primary_candidates) == 1)
+        and not has_top_page_headers
+        and not has_visual_headers
+    ):
         return []
 
     headers.sort(key=lambda item: (item["top"], item["left"]))
@@ -2111,7 +2071,7 @@ def is_header_price_word(word: Word, sku_word: Word, right_edge: float) -> bool:
     if word.x0 < sku_word.x0 + 8 or word.x0 >= right_edge - 1:
         return False
     delta_top = word.top - sku_word.top
-    return 4 <= delta_top <= 18
+    return -2 <= delta_top <= 18
 
 
 def find_split_header_price_words(page: PageText, sku_word: Word, right_edge: float) -> list[Word]:
@@ -2127,7 +2087,7 @@ def find_split_header_price_words(page: PageText, sku_word: Word, right_edge: fl
         if whole.x0 < sku_word.x0 + 8 or whole.x0 >= right_edge - 1:
             continue
         delta_top = whole.top - sku_word.top
-        if not 4 <= delta_top <= 44:
+        if not -2 <= delta_top <= 44:
             continue
 
         cents_candidates = [
@@ -2168,7 +2128,7 @@ def find_header_price_box_right(
         and word.height >= 13
         and word.x0 >= sku_word.x0 + 8
         and word.x0 < default_right_edge - 1
-        and 4 <= word.top - sku_word.top <= 44
+        and -2 <= word.top - sku_word.top <= 44
         and abs(word.mid_y - price_word.mid_y) <= 26
     ]
     price_words.extend(
@@ -2184,17 +2144,53 @@ def find_header_price_box_right(
     if not price_words:
         return default_right_edge
 
-    group_right = price_word.x1
-    for word in sorted(price_words, key=lambda item: (item.x0, -len(item.text))):
-        if word.x1 < price_word.x0 - 1:
-            continue
-        if word.x0 <= group_right + HEADER_PRICE_GROUP_GAP:
-            group_right = max(group_right, word.x1)
-
-    right = group_right + HEADER_PRICE_BOX_PADDING
+    right = price_word.x1 + HEADER_PRICE_BOX_PADDING
     if default_right_edge - right <= HEADER_PAGE_EDGE_TOLERANCE:
         return default_right_edge
     return clamp(right, sku_word.x0 + 16, default_right_edge)
+
+
+def item_header_geometry(
+    page: PageText,
+    sku_word: Word,
+    price_word: Word,
+    default_right_edge: float,
+) -> tuple[float, float, float]:
+    visual = find_visual_price_header_block(page, sku_word, default_right_edge)
+    if visual:
+        return (
+            clamp(float(visual["x0"]), 0, page.width),
+            clamp(float(visual["x1"]), float(visual["x0"]) + 8, page.width),
+            clamp(float(visual["top"]), 0, page.height),
+        )
+
+    left = clamp(sku_word.x0 - HEADER_SKU_TEXT_INSET, 0, page.width)
+    right = find_header_price_box_right(page, sku_word, price_word, default_right_edge)
+    top = clamp(min(sku_word.top - 3, price_word.top - 13), 0, page.height)
+    return left, right, top
+
+
+def find_visual_price_header_block(
+    page: PageText,
+    sku_word: Word,
+    default_right_edge: float,
+) -> dict | None:
+    matches = [
+        block
+        for block in (page.header_blocks or [])
+        if float(block["x0"]) - 5 <= sku_word.x0 <= float(block["x1"]) + 1
+        and float(block["x1"]) <= default_right_edge + 7
+        and abs(float(block["top"]) - sku_word.top) <= 8
+    ]
+    if not matches:
+        return None
+    return min(
+        matches,
+        key=lambda block: (
+            abs(float(block["top"]) - sku_word.top),
+            abs(float(block["x0"]) - sku_word.x0),
+        ),
+    )
 
 
 def find_sequence_header_price_words(page: PageText, sku_word: Word, right_edge: float) -> list[Word]:
@@ -2565,6 +2561,83 @@ def find_large_image_blocks(page) -> list[dict]:
             }
         )
     return sorted(blocks, key=lambda block: (block["top"], block["x0"]))
+
+
+def find_visual_price_header_blocks(page) -> list[dict]:
+    dark_bars = [
+        curve
+        for curve in getattr(page, "curves", [])
+        if curve.get("fill")
+        and is_dark_pdf_color(curve.get("non_stroking_color"))
+        and 6 <= float(curve.get("height", 0)) <= 18
+        and float(curve.get("width", 0)) >= 35
+    ]
+    price_boxes = [
+        curve
+        for curve in getattr(page, "curves", [])
+        if curve.get("fill")
+        and is_price_accent_pdf_color(curve.get("non_stroking_color"))
+        and 15 <= float(curve.get("height", 0)) <= 45
+        and float(curve.get("width", 0)) >= 14
+    ]
+
+    blocks: list[dict] = []
+    for bar in dark_bars:
+        paired = [
+            price_box
+            for price_box in price_boxes
+            if abs(float(price_box["top"]) - float(bar["top"])) <= 1.5
+            and abs(float(price_box["x1"]) - float(bar["x1"])) <= 3
+            and float(price_box["x0"]) < float(bar["x1"])
+            and float(price_box["bottom"]) >= float(bar["bottom"]) + 3
+        ]
+        if not paired:
+            continue
+        price_box = min(paired, key=lambda item: abs(float(item["x1"]) - float(bar["x1"])))
+        block = {
+            "x0": float(bar["x0"]),
+            "x1": max(float(bar["x1"]), float(price_box["x1"])),
+            "top": min(float(bar["top"]), float(price_box["top"])),
+            "bottom": max(float(bar["bottom"]), float(price_box["bottom"])),
+        }
+        if not any(
+            abs(existing["x0"] - block["x0"]) <= 0.5
+            and abs(existing["x1"] - block["x1"]) <= 0.5
+            and abs(existing["top"] - block["top"]) <= 0.5
+            for existing in blocks
+        ):
+            blocks.append(block)
+    return sorted(blocks, key=lambda block: (block["top"], block["x0"]))
+
+
+def pdf_rgb(color) -> tuple[float, float, float] | None:
+    if isinstance(color, (int, float)):
+        value = float(color)
+        return value, value, value
+    if isinstance(color, (tuple, list)) and len(color) >= 3:
+        return float(color[0]), float(color[1]), float(color[2])
+    return None
+
+
+def is_dark_pdf_color(color) -> bool:
+    rgb = pdf_rgb(color)
+    return bool(rgb and max(rgb) < 0.18)
+
+
+def is_price_accent_pdf_color(color) -> bool:
+    rgb = pdf_rgb(color)
+    return bool(
+        rgb
+        and (
+            (
+                rgb[0] > 0.75
+                and 0.30 < rgb[1] < 0.75
+                and rgb[2] < 0.20
+                and rgb[0] > rgb[1] + 0.20
+            )
+            or (rgb[1] > 0.65 and rgb[2] > 0.65 and rgb[0] < 0.65)
+        )
+    )
 
 
 def find_footer_top(page) -> float | None:

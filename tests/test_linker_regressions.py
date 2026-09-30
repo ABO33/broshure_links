@@ -11,6 +11,7 @@ from backend.linker import (
     find_header_price_word,
     find_item_brochure_unit,
     find_table_price_window,
+    item_price_box_status,
     measure_unit_from_price_header,
 )
 
@@ -161,6 +162,95 @@ class LinkerRegressionTests(unittest.TestCase):
         for brochure_unit in spellings:
             for excel_unit in spellings:
                 self.assertEqual(compare_measure_units(brochure_unit, excel_unit)[0], "match")
+
+    def test_euro_only_header_uses_visual_cell_geometry(self):
+        first_sku = Word("35522159", 197.7, 222.8, 18.3, 23.8)
+        first_price = Word("1610", 340.2, 370.0, 19.9, 38.4)
+        next_sku = Word("35525231", 197.7, 223.0, 148.6, 154.1)
+        next_price = Word("1690", 340.0, 370.0, 150.2, 168.7)
+        page = PageText(
+            12,
+            566.929,
+            836.22,
+            [first_sku, first_price, next_sku, next_price],
+            800,
+            header_blocks=[
+                {"x0": 194.83, "x1": 372.09, "top": 14.17, "bottom": 38.27},
+                {"x0": 194.83, "x1": 372.09, "top": 144.51, "bottom": 168.60},
+            ],
+        )
+
+        detections = detect_header_driven_boxes(page, [first_sku, next_sku], 5, 12, 0)
+
+        self.assertEqual(len(detections), 2)
+        self.assertEqual(detections[0]["brochure_price"], 16.10)
+        self.assertAlmostEqual(detections[0]["box"]["x"], 194.83)
+        self.assertAlmostEqual(detections[0]["box"]["y"], 14.17)
+        self.assertAlmostEqual(detections[0]["box"]["width"], 177.26)
+        self.assertAlmostEqual(detections[0]["box"]["height"], 130.34)
+
+    def test_euro_only_price_does_not_validate_neighboring_currency(self):
+        sku = Word("35522159", 10, 35, 10, 16)
+        euro = Word("1610", 100, 130, 11.5, 30)
+        unrelated_price = Word("9999", 140, 175, 11.5, 30)
+        page = PageText(12, 190, 300, [sku, euro, unrelated_price])
+        box = {"x": 6, "y": 7, "width": 175, "height": 100}
+
+        self.assertEqual(item_price_box_status(page, box, sku, euro), ("", ""))
+
+    def test_visual_header_wins_over_variant_table_heuristic(self):
+        code_header = Word("Код", 10, 28, 70, 77)
+        euro_header = Word("€/бр.", 100, 125, 70, 77)
+        sku = Word("35642158", 10, 35, 100, 105.5, comma_primary=True, original_text="35642158-63")
+        price = Word("2250", 100, 132, 101.6, 120.1)
+        page = PageText(
+            12,
+            190,
+            300,
+            [code_header, euro_header, sku, price],
+            285,
+            header_blocks=[{"x0": 7, "x1": 145, "top": 96, "bottom": 120}],
+        )
+
+        detections = detect_header_driven_boxes(page, [sku], 5, 12, 0)
+
+        self.assertEqual([item["sku"] for item in detections], ["35642158"])
+        self.assertEqual(detections[0]["brochure_price"], 22.50)
+
+    def test_new_design_skips_nonvisual_table_sku(self):
+        product_sku = Word("35534881", 10, 35, 10, 15.5)
+        product_price = Word("2599", 100, 132, 11.6, 30.1)
+        table_sku = Word("3513969", 145, 170, 150, 155.5)
+        unrelated_price = Word("2170", 175, 208, 151.6, 170.1)
+        page = PageText(
+            20,
+            220,
+            300,
+            [product_sku, product_price, table_sku, unrelated_price],
+            285,
+            header_blocks=[{"x0": 7, "x1": 138, "top": 6, "bottom": 30}],
+        )
+
+        detections = detect_header_driven_boxes(page, [product_sku, table_sku], 5, 12, 0)
+
+        self.assertEqual([item["sku"] for item in detections], ["35534881"])
+
+    def test_multiline_sku_expression_claims_one_visual_header(self):
+        first_line = Word("268047", 10, 30, 100, 105.5, comma_primary=True, original_text="268047,52,6,8,60,")
+        second_line = Word("3497245", 20, 45, 106, 111.5, comma_primary=True, original_text="3497245-51")
+        price = Word("550", 100, 128, 101.6, 120.1)
+        page = PageText(
+            12,
+            190,
+            300,
+            [first_line, second_line, price],
+            285,
+            header_blocks=[{"x0": 7, "x1": 145, "top": 96, "bottom": 120}],
+        )
+
+        detections = detect_header_driven_boxes(page, [first_line, second_line], 5, 12, 0)
+
+        self.assertEqual([item["sku"] for item in detections], ["268047"])
 
 
 if __name__ == "__main__":

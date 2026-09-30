@@ -4,12 +4,13 @@ These rules capture the brochure behavior established through real PDF regressio
 
 ## Item Cell Geometry
 
-- A readable product cell starts at a black SKU bar paired with its price box.
+- A readable product cell starts at a black SKU bar paired with one euro price box.
+- When the vector header artwork is available, the cell's top, left, and right edges come from the black SKU bar and its colored euro box.
 - The cell's left edge starts at its own SKU bar. It must not enter the product cell on the left.
-- The cell's right edge is the right edge of its own price box. A taller neighboring cell may continue independently.
+- The cell's right edge is the shared right edge of its SKU bar and euro price box. A taller neighboring cell may continue independently.
 - The cell's bottom is the first lower item header whose horizontal span overlaps the current cell.
-- A comma- or range-form SKU bar is still an item header when it has a same-line euro/lev header and a large price directly below it.
-- Small SKU rows under `Код`/description/euro/lev table headers are variants, not item-cell boundaries.
+- A comma- or range-form SKU bar is still an item header when it has a same-line euro header and a large price directly below it.
+- Small SKU rows under `Код`/description/euro table headers are variants, not item-cell boundaries.
 - Variant rows are included in price results and complex grouping but never receive separate PDF link annotations.
 - Full-page products may extend to the footer boundary when there is no lower overlapping item header.
 
@@ -34,10 +35,9 @@ These rules capture the brochure behavior established through real PDF regressio
 
 ## Price Reading
 
-- The brochure euro column is always the first price column; the leva column is second.
-- Variant-table prices come only from the SKU and euro columns. Description, size, litres, and leva values are not price candidates.
-- Split euro prices must use nearby digits from the same price box; cents from a neighboring leva or product column are invalid.
-- Parent and variant leva/euro conversion uses the fixed `1.95583` rate and is flagged when inconsistent.
+- Brochure and website prices are euro-only; no lev/euro conversion is required or validated.
+- Variant-table prices come only from the SKU and euro columns. Description, size, litres, and unrelated numeric values are not price candidates.
+- Split euro prices must use nearby digits from the same price box; cents from a neighboring product column are invalid.
 - A promotion percentage is checked only after the displayed current price is valid.
 - A missing `?` price remains undefined while website and Excel prices may be shown as suggestions.
 - For an `от` item, compare the displayed brochure price only with the lowest-priced SKU in the group; all other group SKUs have an undefined brochure price.

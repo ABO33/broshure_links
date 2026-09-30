@@ -193,7 +193,7 @@ docker compose logs -f uptime-kuma
 - Expand supported comma/range shorthand SKU groups into complex item groups.
 - Include variant SKU tables in the report for price comparison; they do not create separate PDF link boxes.
 - Fall back to `https://praktis.bg/catalogsearch/result?q={sku}` when selected.
-- Optionally find Praktis product links and compare the brochure euro price with the Praktis euro price using a Playwright-controlled Chrome session.
+- Optionally find Praktis product links and compare the brochure euro price with the Praktis euro price using a Playwright-controlled Chrome session; no lev conversion check is performed.
 - Optionally upload an `.xlsx` price file and compare brochure prices with Excel column M SKUs and column U prices.
 - Optionally run a triple check across brochure, Praktis website, and Excel prices.
 - Write invisible PDF link annotations over detected item boxes.

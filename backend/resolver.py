@@ -246,7 +246,6 @@ def extract_price_from_html(html: str) -> float | None:
         r'"price"\s*:\s*"?([0-9]+(?:[.,][0-9]+)?)',
         r"itemprop=[\"']price[\"'][^>]*content=[\"']([0-9]+(?:[.,][0-9]+)?)",
         r"content=[\"']([0-9]+(?:[.,][0-9]+)?)[\"'][^>]*itemprop=[\"']price[\"']",
-        r"([0-9]+(?:[.,][0-9]{2})?)\s*(?:\u043b\u0432|bgn|lv)\b",
     ]
     for pattern in patterns:
         match = re.search(pattern, html, re.I)

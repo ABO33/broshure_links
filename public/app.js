@@ -63,7 +63,6 @@ const labels = {
   link_not_found: "Линк не е намерен",
   price_only: "Само цена",
   repeating_item: "Повтарящ се код",
-  price_box_error: "Грешка в конвертиране цена",
   unit_mismatch: "Грешна мерна единица",
   promotion_percent_error: "Грешен % промо",
   table_header_error: "Грешка в таблица",
