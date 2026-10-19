@@ -222,7 +222,9 @@ def deep_health() -> dict:
         "metrics": metrics_snapshot(),
     }
     with _lock:
-        _stats.last_health = payload
+        # Keep only the latest check results. Saving metrics here recursively
+        # embeds every previous health report in subsequent snapshots.
+        _stats.last_health = {key: value for key, value in payload.items() if key != "metrics"}
     return payload
 
 
