@@ -79,6 +79,21 @@ challenge in the Chrome window that opens. After that, Docker connects to this
 same Windows Chrome profile through `http://host.docker.internal:9222`, so it can
 reuse the trusted browser session instead of using an isolated Docker browser.
 
+Startup verifies a real Playwright connection from Docker to service Chrome and
+stops with an error if the browser cannot be reached. A healthy app container
+alone does not mean Chrome is running. If website checks report
+`connect ECONNREFUSED ...:9222`, restore the dedicated browser and rebuild/restart
+the app from this folder:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\launch-service-chrome.ps1
+docker compose up -d --build --no-deps brochure-linker
+```
+
+Then check `/api/health/deep`; its `chrome_cdp` check must be OK. Running
+`docker-start.cmd` also starts Chrome, rebuilds the image, and checks the
+Playwright connection before starting the services.
+
 To start the service automatically after Windows login, run once:
 
 ```powershell

@@ -8,5 +8,6 @@ tmp/
 logs/
 .praktis-browser-profile/
 .env
+env
 *.log
 .DS_Store

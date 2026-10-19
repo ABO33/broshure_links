@@ -10,5 +10,6 @@ output
 data
 .praktis-browser-profile
 .env
+env
 node_modules
 npm-debug.log

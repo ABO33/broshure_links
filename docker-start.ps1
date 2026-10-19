@@ -5,6 +5,9 @@ Set-Location -LiteralPath $scriptDir
 
 if (Test-Path ".git") {
   git pull --ff-only
+  if ($LASTEXITCODE -ne 0) {
+    throw "Git pull failed. Resolve the repository error before starting Docker."
+  }
 }
 
 $chromeProfile = $env:PRAKTIS_SERVICE_CHROME_PROFILE
@@ -23,8 +26,14 @@ if ($env:PRAKTIS_SERVICE_CHROME_VISIBLE -match "^(1|true|yes)$") {
 & (Join-Path $scriptDir "launch-service-chrome.ps1") @chromeArgs
 
 docker compose build brochure-linker
+if ($LASTEXITCODE -ne 0) {
+  throw "Building the brochure-linker image failed."
+}
 
 $dockerHostProbe = docker compose run --rm --no-deps --entrypoint python brochure-linker -c "import socket; print(socket.gethostbyname('host.docker.internal'))"
+if ($LASTEXITCODE -ne 0) {
+  throw "Docker could not probe the Chrome host address."
+}
 $dockerHostIp = ($dockerHostProbe | Select-String -Pattern "\b(?:\d{1,3}\.){3}\d{1,3}\b" -AllMatches).Matches.Value | Select-Object -Last 1
 
 if (-not $dockerHostIp) {
@@ -32,6 +41,29 @@ if (-not $dockerHostIp) {
 }
 
 $env:PRAKTIS_CDP_URL = "http://${dockerHostIp}:9222"
+
+# Verify the actual Playwright connection, not just the Windows HTTP listener.
+# Chrome must be reachable from inside Docker before brochure jobs can run.
+$browserProbe = @'
+import asyncio
+import os
+from playwright.async_api import async_playwright
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(os.environ['PRAKTIS_CDP_URL'], timeout=15000)
+        if not browser.contexts:
+            raise RuntimeError('Service Chrome did not expose a browser context.')
+        print('Docker Playwright connected to service Chrome: ' + browser.version)
+        await browser.close()
+
+asyncio.run(main())
+'@
+docker compose run --rm --no-deps --entrypoint python brochure-linker -c $browserProbe
+if ($LASTEXITCODE -ne 0) {
+  throw "Docker cannot connect to service Chrome at $env:PRAKTIS_CDP_URL. Check Chrome and Docker networking before processing brochures."
+}
+
 $envPath = Join-Path $scriptDir ".env"
 $envLines = @()
 if (Test-Path -LiteralPath $envPath) {
@@ -72,3 +104,6 @@ $envLines | Set-Content -LiteralPath $envPath -Encoding ASCII
 Write-Host "Using Chrome DevTools endpoint for Docker: $env:PRAKTIS_CDP_URL"
 
 docker compose up -d
+if ($LASTEXITCODE -ne 0) {
+  throw "Starting the Docker services failed."
+}
